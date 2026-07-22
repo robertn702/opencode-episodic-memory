@@ -3,9 +3,10 @@
 Semantic search over your past [OpenCode](https://opencode.ai) conversations.
 Remember past discussions, decisions, and patterns across sessions.
 
-A port of [obra/episodic-memory](https://github.com/obra/episodic-memory) to
-OpenCode primitives — native plugin tools instead of an MCP server, plugin
-events instead of hooks, and OpenCode's own session database as the source.
+Inspired by [obra/episodic-memory](https://github.com/obra/episodic-memory),
+rebuilt for OpenCode primitives — native plugin tools instead of an MCP server,
+plugin events instead of hooks, and OpenCode's own session database as the
+source.
 
 ## How it works
 
