@@ -29,50 +29,53 @@ store layer is the single swap point if a real ANN index is ever needed.
 ## Install
 
 ```bash
-bun install   # first embed downloads the model (~100 MB, cached afterwards)
+opencode plugin opencode-episodic-memory@0.1.2 -g
 ```
 
-```jsonc
-// ~/.config/opencode/opencode.json
-{
-  "plugin": ["/path/to/opencode-episodic-memory/plugin/episodic-memory.ts"]
-}
-```
+This adds the plugin to your OpenCode config (`-g` = global config; omit it
+to install for the current project only). **Pin the version** — OpenCode
+caches npm plugins and never re-resolves a bare name / `@latest`
+([anomalyco/opencode#25293](https://github.com/anomalyco/opencode/issues/25293)).
+To update later, re-run with the new version and `--force`.
 
-Or from npm — pin the version. OpenCode caches npm plugins and never
-re-resolves a bare name / `@latest`
-([anomalyco/opencode#25293](https://github.com/anomalyco/opencode/issues/25293)),
-so to update later you bump the pin:
+Or edit `~/.config/opencode/opencode.json` manually:
 
 ```jsonc
 {
-  "plugin": ["opencode-episodic-memory@0.1.1"]
+  "plugin": ["opencode-episodic-memory@0.1.2"]
 }
 ```
 
-Copy the skill so the agent knows when to search:
+The first embedding run downloads the model (~100 MB, cached afterwards).
+
+Copy the skill so the agent knows when to search. It's included in the npm
+package; once OpenCode has downloaded the plugin (i.e. after first launch),
+copy it out of the package cache — the path contains your pinned version:
 
 ```bash
-cp -r skills/remembering-conversations ~/.config/opencode/skills/
+cp -r ~/.cache/opencode/packages/opencode-episodic-memory@0.1.2/node_modules/opencode-episodic-memory/skills/remembering-conversations ~/.config/opencode/skills/
 ```
 
 Then backfill existing history and restart OpenCode:
 
 ```bash
-bun run src/cli.ts sync
+bunx opencode-episodic-memory@0.1.2 sync
 ```
 
 ## CLI
 
+The package ships an `opencode-episodic` binary (requires `bun` on PATH).
+Invoke it through the package spec — pin it to match your plugin version:
+
 ```bash
-bun run src/cli.ts sync [--force]          # index new/changed sessions
-bun run src/cli.ts search "query"          # semantic search
-bun run src/cli.ts search q --text "exact" # require substring
-bun run src/cli.ts search q --after 2026-07-01 --limit 5
-bun run src/cli.ts read <session-id>       # full transcript (live store)
-bun run src/cli.ts read <id> --indexed     # indexed excerpts (survives deletion)
-bun run src/cli.ts stats                   # index statistics
-bun run src/cli.ts doctor                  # diagnose setup
+bunx opencode-episodic-memory@0.1.2 sync [--force]          # index new/changed sessions
+bunx opencode-episodic-memory@0.1.2 search "query"          # semantic search
+bunx opencode-episodic-memory@0.1.2 search q --text "exact" # require substring
+bunx opencode-episodic-memory@0.1.2 search q --after 2026-07-01 --limit 5
+bunx opencode-episodic-memory@0.1.2 read <session-id>       # full transcript (live store)
+bunx opencode-episodic-memory@0.1.2 read <id> --indexed     # indexed excerpts (survives deletion)
+bunx opencode-episodic-memory@0.1.2 stats                   # index statistics
+bunx opencode-episodic-memory@0.1.2 doctor                  # diagnose setup
 ```
 
 `--after`/`--before` take `YYYY-MM-DD` (midnight UTC). `--after D` is inclusive
@@ -111,6 +114,28 @@ instruction-tag match — the intent is the same, but our matching is literal.
   would use OpenCode provider auth via `client.session.prompt`)
 - Multi-concept AND search, MCP server wrapper for non-OpenCode clients
 - ANN index (see design note above)
+
+## Development
+
+To hack on the plugin itself, clone the repo and point OpenCode at the local
+entrypoint instead of the npm package:
+
+```bash
+git clone https://github.com/robertn702/opencode-episodic-memory.git
+cd opencode-episodic-memory
+bun install
+```
+
+```jsonc
+// ~/.config/opencode/opencode.json
+{
+  "plugin": ["/path/to/opencode-episodic-memory/plugin/episodic-memory.ts"]
+}
+```
+
+Inside the repo, run the CLI as `bun run src/cli.ts <command>` (same
+subcommands as above), tests with `bun test`, and typechecking with
+`bun run typecheck`.
 
 ## License
 
