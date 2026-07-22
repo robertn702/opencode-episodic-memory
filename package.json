@@ -1,6 +1,6 @@
 {
   "name": "opencode-episodic-memory",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Semantic search over past OpenCode conversations — local embeddings (Transformers.js), SQLite index, native plugin tools. Inspired by obra/episodic-memory, rebuilt natively for OpenCode.",
   "type": "module",
   "license": "MIT",
