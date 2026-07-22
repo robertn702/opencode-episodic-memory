@@ -2,7 +2,7 @@
 // opencode-episodic <command> [options]
 //   sync [--force]                 Index new/changed sessions from opencode.db
 //   search <query> [options]       Semantic (vector) search over indexed conversations
-//     --text "phrase"              Lexical BM25 search for this phrase instead of vector
+//     --text "terms"               Lexical BM25 search for these terms (all AND-matched) instead of vector
 //     --hybrid                     Fuse vector + BM25 (RRF); off by default (see AGENTS.md)
 //     --after YYYY-MM-DD           Only conversations after this date
 //     --before YYYY-MM-DD          Only conversations before this date
@@ -57,6 +57,22 @@ function dateArg(s: string | undefined): number | undefined {
   return r.ms;
 }
 
+// Parse/validate --limit (default 10). Same hard error+exit(1) pattern as an
+// invalid date: without this, Number("abc") → NaN silently yields "No results.",
+// and a negative limit slices from the end of the ranked list. Must be a
+// positive integer; clamped to 1000 (a CLI sanity ceiling — plenty for a human
+// debugging session).
+function limitArg(s: string | undefined): number {
+  if (s === undefined) return 10;
+  const n = Number.parseInt(s, 10);
+  if (!Number.isFinite(n) || n < 1) {
+    console.error(`error: invalid --limit "${s}" (expected a positive integer).`);
+    console.error(USAGE);
+    process.exit(1);
+  }
+  return Math.min(n, 1000);
+}
+
 async function main() {
   switch (command) {
     case "sync": {
@@ -79,7 +95,7 @@ async function main() {
       if (!query) { console.error("usage: opencode-episodic search <query> [--text p] [--hybrid] [--after d] [--before d] [--limit n]"); process.exit(1); }
       const index = openIndex();
       const opts = {
-        limit: Number(values.limit ?? 10),
+        limit: limitArg(values.limit),
         after: dateArg(values.after),
         before: dateArg(values.before),
       };
@@ -95,7 +111,8 @@ async function main() {
           ? "No results. The index is empty — run: bun run src/cli.ts sync"
           : "No results.");
       } else {
-        console.log(formatHits(hits, 220));
+        // Hybrid hits carry RRF scores (~0.03), not cosine — label them "rrf".
+        console.log(formatHits(hits, 220, values.hybrid ? "rrf" : "score"));
       }
       break;
     }

@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openIndex, replaceSessionChunks, search, textSearch, getIndexedSession } from "./store";
+import { pruneOrphans } from "./indexer";
+import type { SourceSession } from "./reader";
 
 const dir = mkdtempSync(join(tmpdir(), "episodic-store-test-"));
 const db = openIndex(join(dir, "index.db"));
@@ -162,5 +164,53 @@ describe("store", () => {
     expect(textSearch(db, "alpha OR beta")).toHaveLength(0);
     // Malformed quoting must never throw (scoreFts falls back to LIKE).
     expect(() => textSearch(db, 'dangling " quote')).not.toThrow();
+  });
+
+  test("hybrid fusion reorders relative to pure vector (deterministic RRF ordering)", () => {
+    // seq0 wins on vector (cosine 1.0 vs 0.8) but is invisible to BM25; seq1 is
+    // second on vector yet the sole BM25 match for the query. RRF: seq0 gets
+    // 1/(60+1); seq1 gets 1/(60+2) [vector rank 2] + 1/(60+1) [BM25 rank 1],
+    // which is strictly larger — so fusion must FLIP the order to [seq1, seq0].
+    replaceSessionChunks(db, meta, [
+      { seq: 0, time_created: 1000, text: "alpha standalone note", embedding: new Float32Array([1, 0]) },
+      { seq: 1, time_created: 1001, text: "kubernetes deployment guide", embedding: new Float32Array([0.8, 0.6]) },
+    ]);
+    const vec = new Float32Array([1, 0]);
+    // Pure vector keeps seq0 first (higher cosine).
+    expect(search(db, vec).map((h) => h.seq)).toEqual([0, 1]);
+    // Hybrid flips to seq1-first — asserting ORDER, not just set membership.
+    const hybrid = search(db, vec, { hybrid: true, queryText: "kubernetes deployment" });
+    expect(hybrid.map((h) => h.seq)).toEqual([1, 0]);
+  });
+
+  test("pruneOrphans removes FTS postings, not just chunk rows (chunks_ad trigger)", () => {
+    // Isolated DB so pruning everything can't disturb the shared `db` above.
+    const idx = openIndex(join(dir, "prune.db"));
+    try {
+      replaceSessionChunks(idx, { ...meta, id: "ses_keep", title: "Keep" }, [
+        { seq: 0, time_created: 1, text: "keepable kubernetes content", embedding: new Float32Array([1, 0]) },
+      ]);
+      replaceSessionChunks(idx, { ...meta, id: "ses_drop", title: "Drop" }, [
+        { seq: 0, time_created: 1, text: "droppable elasticsearch content", embedding: new Float32Array([1, 0]) },
+      ]);
+      // Both are lexically searchable through the FTS index up front.
+      expect(textSearch(idx, "kubernetes").map((h) => h.session_id)).toEqual(["ses_keep"]);
+      expect(textSearch(idx, "elasticsearch").map((h) => h.session_id)).toEqual(["ses_drop"]);
+
+      // Source now retains only ses_keep → ses_drop is an orphan. (knownSource is
+      // supplied, so the `source` Database arg is unused — pass idx as a stand-in.)
+      const kept: SourceSession[] = [
+        { id: "ses_keep", project_id: "p", parent_id: null, title: "Keep", directory: "/tmp", time_created: 1, time_updated: 1 },
+      ];
+      expect(pruneOrphans(idx, idx, kept)).toBe(1);
+
+      // The dropped session's FTS posting is gone (the DELETE fired chunks_ad),
+      // while the kept session still matches — proving the trigger, not just the
+      // row delete, took effect.
+      expect(textSearch(idx, "elasticsearch")).toHaveLength(0);
+      expect(textSearch(idx, "kubernetes").map((h) => h.session_id)).toEqual(["ses_keep"]);
+    } finally {
+      idx.close();
+    }
   });
 });

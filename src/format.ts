@@ -56,12 +56,15 @@ export function renderTranscript(
 }
 
 // One search hit as a markdown block. snippetLength defaults to 400 (plugin
-// tool output); the CLI passes 220 to keep terminal output brief.
-export function formatHit(h: SearchHit, snippetLength = 400): string {
+// tool output); the CLI passes 220 to keep terminal output brief. scoreLabel
+// names the score field: "score" for vector (cosine ~0.4–0.7) and BM25, "rrf"
+// for hybrid (fused reciprocal-rank scores ~0.03, a different scale — see
+// AGENTS.md) so the number isn't misread against the cosine thresholds.
+export function formatHit(h: SearchHit, snippetLength = 400, scoreLabel = "score"): string {
   const snippet = h.text.replace(/\s+/g, " ").slice(0, snippetLength);
-  return `## ${fmtDate(h.time_created)} — ${h.title}\nsession: ${h.session_id}  score: ${h.score.toFixed(3)}\n${h.directory}\n> ${snippet}`;
+  return `## ${fmtDate(h.time_created)} — ${h.title}\nsession: ${h.session_id}  ${scoreLabel}: ${h.score.toFixed(3)}\n${h.directory}\n> ${snippet}`;
 }
 
-export function formatHits(hits: SearchHit[], snippetLength = 400): string {
-  return hits.map((h) => formatHit(h, snippetLength)).join("\n\n");
+export function formatHits(hits: SearchHit[], snippetLength = 400, scoreLabel = "score"): string {
+  return hits.map((h) => formatHit(h, snippetLength, scoreLabel)).join("\n\n");
 }

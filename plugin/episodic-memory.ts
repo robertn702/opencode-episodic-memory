@@ -60,7 +60,7 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
         args: {
           query: tool.schema.string().describe("Natural-language description of what you're looking for"),
           text: tool.schema.string().optional().describe("Exact substring to require in results (ANDed with semantic ranking)"),
-          mode: tool.schema.enum(["vector", "text", "hybrid"]).optional().describe("'vector' (default) semantic search; 'text' lexical BM25; 'hybrid' fuses both via RRF (may surface lexical noise)"),
+          mode: tool.schema.enum(["vector", "text", "hybrid"]).optional().describe("'vector' (default) semantic search, scores are cosine (~0.4–0.7); 'text' lexical BM25; 'hybrid' fuses both via RRF (may surface lexical noise) — note hybrid hits carry fused RRF scores (~0.03), a DIFFERENT scale from cosine, so don't judge them against the vector thresholds"),
           after: tool.schema.string().optional().describe("Only conversations after YYYY-MM-DD"),
           before: tool.schema.string().optional().describe("Only conversations before YYYY-MM-DD"),
           limit: tool.schema.number().optional().describe("Max results, 1-50 (default 10)"),
@@ -87,7 +87,8 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
             if (isIndexEmpty(index)) return "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations.";
             return "No matching past conversations found.";
           }
-          return formatHits(hits);
+          // Hybrid hits carry RRF scores (~0.03), not cosine — label them "rrf".
+          return formatHits(hits, 400, args.mode === "hybrid" ? "rrf" : "score");
         },
       }),
 
