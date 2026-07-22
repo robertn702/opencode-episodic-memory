@@ -25,7 +25,8 @@
   "files": [
     "plugin",
     "src",
-    "skills"
+    "skills",
+    "!src/*.test.ts"
   ],
   "bin": {
     "opencode-episodic": "src/cli.ts"

@@ -110,7 +110,10 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
                 }
                 return renderTranscript(s, checked.messages).slice(0, 50000);
               }
-            } catch {
+            } catch (e) {
+              // Log before falling through — a bare swallow would also hide
+              // structural Zod drift, which is meant to be loud.
+              await log("warn", `episodic_read live-store read failed for ${args.session_id}: ${e}`);
               // fall through to indexed copy
             }
           }

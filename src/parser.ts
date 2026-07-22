@@ -29,8 +29,9 @@ export interface Exchange {
   time: number;
 }
 
-const SKIP_PART_TYPES = new Set(["reasoning", "step-start", "step-finish", "file", "patch", "snapshot"]);
-
+// reasoning blobs, step markers, and every other non-text/-tool part type are
+// excluded implicitly: textOf keeps only type === "text" and toolNames only
+// type === "tool", so nothing else can slip through.
 function textOf(parts: SourcePart[]): string {
   return parts
     .filter((p) => p.type === "text" && p.text)
@@ -41,7 +42,7 @@ function textOf(parts: SourcePart[]): string {
 
 function toolNames(parts: SourcePart[]): string[] {
   return parts
-    .filter((p) => p.type === "tool" && p.tool && !SKIP_PART_TYPES.has(p.type))
+    .filter((p) => p.type === "tool" && p.tool)
     .map((p) => p.tool!);
 }
 

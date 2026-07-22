@@ -10,6 +10,7 @@
 //   stats                          Index statistics
 //   doctor                         Diagnose setup
 import { existsSync } from "node:fs";
+import { parseArgs } from "node:util";
 import { openSource, sourceDbPath, getSession, getTranscriptChecked } from "./reader";
 import { openIndex, indexDbPath, search, textSearch, stats, isIndexEmpty } from "./store";
 import { syncAll } from "./indexer";
@@ -17,38 +18,39 @@ import { embed, embedQuery } from "./embed";
 import { parseDateArg, fmtDate, renderTranscript, formatHits } from "./format";
 
 const [, , command, ...rest] = process.argv;
+const USAGE = "commands: sync | search | read | stats | doctor";
 
-function flag(name: string): string | null {
-  const i = rest.indexOf(`--${name}`);
-  return i >= 0 ? rest[i + 1] ?? null : null;
-}
-function hasFlag(name: string): boolean {
-  return rest.includes(`--${name}`);
-}
-const VALUE_FLAGS = new Set(["--text", "--after", "--before", "--limit"]);
-function positional(): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < rest.length; i++) {
-    const t = rest[i];
-    if (t.startsWith("--")) {
-      if (VALUE_FLAGS.has(t)) {
-        const next = rest[i + 1];
-        if (next === undefined || next.startsWith("--")) {
-          console.error(`error: ${t} requires a value`);
-          process.exit(1);
-        }
-        i++; // only value flags consume the next token
-      }
-      continue;
-    }
-    out.push(t);
+// parseArgs (node:util, supported in Bun) over the tokens after the command.
+// strict:true rejects unknown flags and missing values — we map those throws to
+// the same error+usage+exit(1) the hand-rolled parser used. `search` joins the
+// positionals with spaces as its query.
+function parseCli() {
+  try {
+    return parseArgs({
+      args: rest,
+      options: {
+        text: { type: "string" },
+        after: { type: "string" },
+        before: { type: "string" },
+        limit: { type: "string" },
+        force: { type: "boolean" },
+        indexed: { type: "boolean" },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+  } catch (e) {
+    console.error(`error: ${e instanceof Error ? e.message : e}`);
+    console.error(USAGE);
+    process.exit(1);
   }
-  return out;
 }
+const { values, positionals } = parseCli();
+
 // Map the shared parseDateArg union onto CLI semantics: print the error and
-// exit non-zero. `flag()` yields null for an absent flag (→ no date filter).
-function dateArg(s: string | null): number | undefined {
-  const r = parseDateArg(s ?? undefined);
+// exit non-zero. `values.*` is undefined for an absent flag (→ no date filter).
+function dateArg(s: string | undefined): number | undefined {
+  const r = parseDateArg(s);
   if (!r.ok) { console.error(`error: ${r.error}`); process.exit(1); }
   return r.ms;
 }
@@ -59,7 +61,7 @@ async function main() {
       const source = openSource();
       const index = openIndex();
       const r = await syncAll(source, index, {
-        force: hasFlag("force"),
+        force: values.force,
         onProgress: (done, total, title) =>
           process.stderr.write(`\r[${done}/${total}] ${title.slice(0, 60)}                    `),
       });
@@ -71,15 +73,15 @@ async function main() {
     }
 
     case "search": {
-      const query = positional().join(" ");
+      const query = positionals.join(" ");
       if (!query) { console.error("usage: opencode-episodic search <query> [--text p] [--after d] [--before d] [--limit n]"); process.exit(1); }
       const index = openIndex();
       const opts = {
-        limit: Number(flag("limit") ?? 10),
-        after: dateArg(flag("after")),
-        before: dateArg(flag("before")),
+        limit: Number(values.limit ?? 10),
+        after: dateArg(values.after),
+        before: dateArg(values.before),
       };
-      const textFlag = flag("text");
+      const textFlag = values.text;
       const hits = textFlag
         ? textSearch(index, textFlag, opts)
         : search(index, (await embedQuery(query))[0], opts);
@@ -94,9 +96,9 @@ async function main() {
     }
 
     case "read": {
-      const id = positional()[0];
+      const id = positionals[0];
       if (!id) { console.error("usage: opencode-episodic read <session-id> [--indexed]"); process.exit(1); }
-      if (hasFlag("indexed")) {
+      if (values.indexed) {
         const index = openIndex();
         const rows = index
           .prepare<{ seq: number; text: string }, [string]>("SELECT seq, text FROM chunks WHERE session_id = ? ORDER BY seq")
