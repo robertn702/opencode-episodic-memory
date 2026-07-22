@@ -1,5 +1,7 @@
 # opencode-episodic-memory
 
+[![skills.sh](https://skills.sh/b/robertn702/opencode-episodic-memory)](https://skills.sh/robertn702/opencode-episodic-memory)
+
 Semantic search over your past [OpenCode](https://opencode.ai) conversations.
 Remember past discussions, decisions, and patterns across sessions.
 
@@ -52,9 +54,19 @@ Or edit `~/.config/opencode/opencode.json` manually:
 
 The first embedding run downloads the model (~100 MB, cached afterwards).
 
-Copy the skill so the agent knows when to search. It's included in the npm
-package; once OpenCode has downloaded the plugin (i.e. after first launch),
-copy it out of the package cache — the path contains your pinned version:
+Install the skill so the agent knows when to search, via the
+[`skills` CLI](https://github.com/vercel-labs/skills):
+
+```bash
+npx skills add robertn702/opencode-episodic-memory -g
+```
+
+(`-g` installs to `~/.config/opencode/skills/`; omit it to install into the
+current project. `npx skills update` picks up future skill changes.)
+
+Alternatively, copy it manually — it's included in the npm package; once
+OpenCode has downloaded the plugin (i.e. after first launch), copy it out of
+the package cache (the path contains your pinned version):
 
 ```bash
 cp -r ~/.cache/opencode/packages/opencode-episodic-memory@0.1.2/node_modules/opencode-episodic-memory/skills/remembering-conversations ~/.config/opencode/skills/
