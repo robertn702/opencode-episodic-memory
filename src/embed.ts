@@ -24,6 +24,9 @@ let cached: Promise<FeatureExtractionPipeline> | null = null;
 
 export function getEmbedder(): Promise<FeatureExtractionPipeline> {
   if (!cached) {
+    // transformers.js declares pipeline<"feature-extraction"> as its task-metadata
+    // record, not the FeatureExtractionPipeline instance it returns at runtime, so
+    // this cast restores the documented return type (matches HuggingFace's examples).
     cached = pipeline("feature-extraction", process.env.EPISODIC_EMBED_MODEL ?? DEFAULT_MODEL, {
       dtype: "q8",
     }) as Promise<FeatureExtractionPipeline>;
@@ -39,6 +42,8 @@ async function embedRaw(texts: string[]): Promise<Float32Array[]> {
   const e = await getEmbedder();
   const out = await e(texts.map((t) => t.slice(0, MAX_CHARS)), { pooling: "cls", normalize: true });
   const dims: number = out.dims[out.dims.length - 1];
+  // out.data is DataArray (a union incl. bigint typed arrays); a feature-extraction
+  // tensor with normalize:true is a Float32Array at runtime, so this cast is safe.
   const flat = new Float32Array(out.data as Float32Array);
   const vectors: Float32Array[] = [];
   for (let i = 0; i < texts.length; i++) {

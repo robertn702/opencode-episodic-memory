@@ -39,54 +39,72 @@ export function sourceDbPath(): string {
 
 export function listSessions(db: Database): SourceSession[] {
   return db
-    .prepare(
+    .prepare<SourceSession, []>(
       `SELECT id, project_id, parent_id, title, directory, time_created, time_updated
        FROM session WHERE time_archived IS NULL ORDER BY time_created`
     )
-    .all() as SourceSession[];
+    .all();
 }
 
 export function getSession(db: Database, sessionId: string): SourceSession | null {
   return (
-    (db
-      .prepare(
+    db
+      .prepare<SourceSession, [string]>(
         `SELECT id, project_id, parent_id, title, directory, time_created, time_updated
          FROM session WHERE id = ?`
       )
-      .get(sessionId) as SourceSession | null) ?? null
+      .get(sessionId) ?? null
   );
+}
+
+// JSON.parse returns `any`; these guards validate shape at runtime so no type
+// assertion is needed. Malformed rows degrade gracefully (unknown type/role).
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+function parsePart(data: string): SourcePart {
+  const raw: unknown = JSON.parse(data);
+  if (!isRecord(raw)) return { type: "unknown" };
+  return {
+    type: typeof raw.type === "string" ? raw.type : "unknown",
+    text: typeof raw.text === "string" ? raw.text : undefined,
+    tool: typeof raw.tool === "string" ? raw.tool : undefined,
+  };
+}
+
+function parseRole(data: string): string {
+  const raw: unknown = JSON.parse(data);
+  return isRecord(raw) && typeof raw.role === "string" ? raw.role : "unknown";
 }
 
 export function getTranscript(db: Database, sessionId: string): SourceMessage[] {
   const messages = db
-    .prepare(
+    .prepare<{ id: string; time_created: number; data: string }, [string]>(
       `SELECT id, time_created, data FROM message
        WHERE session_id = ? ORDER BY time_created, id`
     )
-    .all(sessionId) as { id: string; time_created: number; data: string }[];
+    .all(sessionId);
 
   const parts = db
-    .prepare(
+    .prepare<{ message_id: string; data: string }, [string]>(
       `SELECT message_id, data FROM part
        WHERE session_id = ? ORDER BY time_created, id`
     )
-    .all(sessionId) as { message_id: string; data: string }[];
+    .all(sessionId);
 
   const partsByMsg = new Map<string, SourcePart[]>();
   for (const p of parts) {
-    const d = JSON.parse(p.data) as SourcePart;
+    const d = parsePart(p.data);
     let list = partsByMsg.get(p.message_id);
     if (!list) partsByMsg.set(p.message_id, (list = []));
     list.push(d);
   }
 
-  return messages.map((m) => {
-    const d = JSON.parse(m.data) as { role?: string };
-    return {
-      id: m.id,
-      role: d.role ?? "unknown",
-      timeCreated: m.time_created,
-      parts: partsByMsg.get(m.id) ?? [],
-    };
-  });
+  return messages.map((m) => ({
+    id: m.id,
+    role: parseRole(m.data),
+    timeCreated: m.time_created,
+    parts: partsByMsg.get(m.id) ?? [],
+  }));
 }

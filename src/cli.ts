@@ -114,8 +114,8 @@ async function main() {
       if (hasFlag("indexed")) {
         const index = openIndex();
         const rows = index
-          .prepare("SELECT seq, text FROM chunks WHERE session_id = ? ORDER BY seq")
-          .all(id) as { seq: number; text: string }[];
+          .prepare<{ seq: number; text: string }, [string]>("SELECT seq, text FROM chunks WHERE session_id = ? ORDER BY seq")
+          .all(id);
         if (rows.length === 0) { console.error("no indexed content for", id); process.exit(1); }
         for (const r of rows) console.log(r.text, "\n---");
         break;
@@ -147,7 +147,7 @@ async function main() {
       console.log(`sessions: ${s.sessions} (${s.excluded} excluded/empty), chunks: ${s.chunks}`);
       if (s.oldest) console.log(`range: ${fmtDate(Number(s.oldest))} → ${fmtDate(Number(s.newest))}`);
       console.log("\nTop directories:");
-      for (const row of s.byDirectory as { directory: string; n: number }[]) {
+      for (const row of s.byDirectory) {
         console.log(`  ${row.n}\t${row.directory}`);
       }
       break;
@@ -160,7 +160,7 @@ async function main() {
       else { console.error(`✗ source DB missing: ${src}`); ok = false; }
       try {
         const source = openSource();
-        const n = (source.prepare("SELECT COUNT(*) n FROM session").get() as { n: number }).n;
+        const n = source.prepare<{ n: number }, []>("SELECT COUNT(*) n FROM session").get()?.n ?? 0;
         console.log(`✓ source readable: ${n} sessions`);
       } catch (e) { console.error(`✗ source unreadable: ${e}`); ok = false; }
       try {

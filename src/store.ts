@@ -55,7 +55,7 @@ export interface IndexedSession {
 }
 
 export function getIndexedSession(db: Database, id: string): IndexedSession | null {
-  return (db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as IndexedSession | null) ?? null;
+  return db.prepare<IndexedSession, [string]>("SELECT * FROM sessions WHERE id = ?").get(id) ?? null;
 }
 
 export function replaceSessionChunks(
@@ -116,14 +116,14 @@ export function search(db: Database, queryVec: Float32Array, opts: SearchOptions
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
   const rows = db
-    .prepare(
+    .prepare<{
+      session_id: string; seq: number; time_created: number; text: string;
+      embedding: Uint8Array; title: string; directory: string;
+    }, (string | number)[]>(
       `SELECT c.session_id, c.seq, c.time_created, c.text, c.embedding, s.title, s.directory
        FROM chunks c JOIN sessions s ON s.id = c.session_id ${where}`
     )
-    .all(...params) as {
-    session_id: string; seq: number; time_created: number; text: string;
-    embedding: Uint8Array; title: string; directory: string;
-  }[];
+    .all(...params);
 
   const dims = queryVec.length;
   const minScore = opts.minScore ?? 0;
@@ -152,25 +152,42 @@ export function textSearch(db: Database, query: string, opts: SearchOptions = {}
   if (opts.after) { clauses.push("c.time_created >= ?"); params.push(opts.after); }
   if (opts.before) { clauses.push("c.time_created < ?"); params.push(opts.before); }
   const rows = db
-    .prepare(
+    .prepare<Omit<SearchHit, "score">, (string | number)[]>(
       `SELECT c.session_id, c.seq, c.time_created, c.text, s.title, s.directory
        FROM chunks c JOIN sessions s ON s.id = c.session_id
        WHERE ${clauses.join(" AND ")} ORDER BY c.time_created DESC LIMIT ?`
     )
-    .all(...params, limit) as Omit<SearchHit, "score">[];
+    .all(...params, limit);
   return rows.map((r) => ({ ...r, score: 1 }));
 }
 
-export function stats(db: Database) {
-  const one = (sql: string) => db.prepare(sql).get() as Record<string, number | string | null>;
+export interface IndexStats {
+  sessions: number;
+  excluded: number;
+  chunks: number;
+  oldest: number | null;
+  newest: number | null;
+  byDirectory: { directory: string; n: number }[];
+}
+
+export function stats(db: Database): IndexStats {
+  // COUNT/MIN/MAX always return exactly one row; guard anyway so the row type
+  // stays non-null without a cast.
+  function one<T>(sql: string): T {
+    const row = db.prepare<T, []>(sql).get();
+    if (!row) throw new Error(`stats query returned no row: ${sql}`);
+    return row;
+  }
   return {
-    sessions: one("SELECT COUNT(*) n FROM sessions").n,
-    excluded: one("SELECT COUNT(*) n FROM sessions WHERE status != 'indexed'").n,
-    chunks: one("SELECT COUNT(*) n FROM chunks").n,
-    oldest: one("SELECT MIN(time_created) t FROM chunks").t,
-    newest: one("SELECT MAX(time_created) t FROM chunks").t,
+    sessions: one<{ n: number }>("SELECT COUNT(*) n FROM sessions").n,
+    excluded: one<{ n: number }>("SELECT COUNT(*) n FROM sessions WHERE status != 'indexed'").n,
+    chunks: one<{ n: number }>("SELECT COUNT(*) n FROM chunks").n,
+    oldest: one<{ t: number | null }>("SELECT MIN(time_created) t FROM chunks").t,
+    newest: one<{ t: number | null }>("SELECT MAX(time_created) t FROM chunks").t,
     byDirectory: db
-      .prepare("SELECT directory, COUNT(*) n FROM sessions WHERE status = 'indexed' GROUP BY directory ORDER BY n DESC LIMIT 10")
+      .prepare<{ directory: string; n: number }, []>(
+        "SELECT directory, COUNT(*) n FROM sessions WHERE status = 'indexed' GROUP BY directory ORDER BY n DESC LIMIT 10"
+      )
       .all(),
   };
 }

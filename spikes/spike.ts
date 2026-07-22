@@ -12,10 +12,9 @@ console.log("=== Spike 1: vector store (brute-force cosine; bun:sqlite cannot lo
   ins.run(new Float32Array([1, 0, 0, 0]));
   ins.run(new Float32Array([0.9, 0.1, 0, 0]).map((x) => x / Math.hypot(0.9, 0.1)));
   ins.run(new Float32Array([0, 0, 1, 0]));
-  const rows = db.prepare("SELECT id, embedding FROM chunks").all() as {
-    id: number;
-    embedding: Uint8Array;
-  }[];
+  const rows = db
+    .prepare<{ id: number; embedding: Uint8Array }, []>("SELECT id, embedding FROM chunks")
+    .all();
   const q = new Float32Array([1, 0, 0, 0]);
   const scored = rows
     .map((r) => {
@@ -35,26 +34,27 @@ console.log("=== Spike 2: transcript reconstruction from opencode.db ===");
   const path = `${process.env.HOME}/.local/share/opencode/opencode.db`;
   const db = new Database(path, { readonly: true });
   const session = db
-    .prepare(
+    .prepare<{ id: string; title: string; directory: string; time_created: number }, []>(
       `SELECT s.id, s.title, s.directory, s.time_created
        FROM session s ORDER BY s.time_created DESC LIMIT 1`
     )
-    .get() as { id: string; title: string; directory: string; time_created: number };
+    .get();
+  if (!session) throw new Error("no sessions in opencode.db");
   console.log("latest session:", session.title, `(${session.id})`);
 
   const messages = db
-    .prepare(
+    .prepare<{ id: string; time_created: number; data: string }, [string]>(
       `SELECT m.id, m.time_created, m.data FROM message m
        WHERE m.session_id = ? ORDER BY m.time_created, m.id`
     )
-    .all(session.id) as { id: string; time_created: number; data: string }[];
+    .all(session.id);
 
   const parts = db
-    .prepare(
+    .prepare<{ message_id: string; data: string }, [string]>(
       `SELECT p.message_id, p.data FROM part p
        WHERE p.session_id = ? ORDER BY p.time_created, p.id`
     )
-    .all(session.id) as { message_id: string; data: string }[];
+    .all(session.id);
 
   const partsByMsg = new Map<string, { type: string; text?: string; tool?: string }[]>();
   for (const p of parts) {
@@ -65,8 +65,9 @@ console.log("=== Spike 2: transcript reconstruction from opencode.db ===");
 
   let exchanges = 0;
   for (const m of messages.slice(0, 6)) {
-    const md = JSON.parse(m.data);
-    const role = md.role as string;
+    const md: unknown = JSON.parse(m.data);
+    const role =
+      md && typeof md === "object" && "role" in md && typeof md.role === "string" ? md.role : "unknown";
     const ps = partsByMsg.get(m.id) ?? [];
     const text = ps
       .filter((p) => p.type === "text")
@@ -90,6 +91,8 @@ console.log("=== Spike 3: transformers.js local embedding ===");
     pooling: "mean",
     normalize: true,
   });
+  // out.data is a DataArray union; mean-pooled + normalized output is a
+  // Float32Array at runtime.
   const vec = new Float32Array(out.data as Float32Array);
   console.log(`OK: embedded, dims=${vec.length}, first=${vec[0].toFixed(4)}`);
 }
