@@ -37,7 +37,8 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
-    "@opencode-ai/plugin": "^1.18.4"
+    "@opencode-ai/plugin": "^1.18.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/bun": "latest",

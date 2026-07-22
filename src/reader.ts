@@ -3,24 +3,59 @@
 import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 
 export const DEFAULT_SOURCE_DB = join(homedir(), ".local/share/opencode/opencode.db");
 
-export interface SourceSession {
-  id: string;
-  project_id: string;
-  parent_id: string | null;
-  title: string;
-  directory: string;
-  time_created: number;
-  time_updated: number;
-}
+// --- Validation strategy ----------------------------------------------------
+// Two surfaces, two failure modes (see AGENTS.md):
+//   1. Structural rows we SELECT from opencode.db (columns: id, time_created,
+//      data, ...). These are a uniform contract; if a column's type/nullability
+//      drifts it drifts for every row, so we THROW (`.parse`) to surface
+//      OpenCode schema changes loudly instead of silently mis-reading them.
+//   2. The JSON blob inside each `data` column (message role, part contents).
+//      This format evolves and carries many part shapes we don't model, so we
+//      DEGRADE per-row to "unknown"/undefined (`.catch`): one corrupt or
+//      unfamiliar blob can never abort a whole transcript read, and the parser
+//      already filters unknown types/roles downstream.
+// No `as` assertions: schemas narrow via `.parse()`.
 
-export interface SourcePart {
-  type: string;
-  text?: string;
-  tool?: string;
-}
+// --- Structural row schemas (throw on drift) --------------------------------
+const SessionRowSchema = z.object({
+  id: z.string(),
+  project_id: z.string(),
+  parent_id: z.string().nullable(),
+  title: z.string(),
+  directory: z.string(),
+  time_created: z.number(),
+  time_updated: z.number(),
+});
+export type SourceSession = z.infer<typeof SessionRowSchema>;
+
+const MessageRowSchema = z.object({
+  id: z.string(),
+  time_created: z.number(),
+  data: z.string(),
+});
+
+const PartRowSchema = z.object({
+  message_id: z.string(),
+  data: z.string(),
+});
+
+// --- JSON blob schemas (degrade to "unknown" on mismatch) -------------------
+const PartDataSchema = z
+  .object({
+    type: z.string().catch("unknown"),
+    text: z.string().optional().catch(undefined),
+    tool: z.string().optional().catch(undefined),
+  })
+  .catch({ type: "unknown" });
+export type SourcePart = z.infer<typeof PartDataSchema>;
+
+const MessageDataSchema = z
+  .object({ role: z.string().catch("unknown") })
+  .catch({ role: "unknown" });
 
 export interface SourceMessage {
   id: string;
@@ -37,35 +72,9 @@ export function sourceDbPath(): string {
   return process.env.EPISODIC_SOURCE_DB ?? DEFAULT_SOURCE_DB;
 }
 
-export function listSessions(db: Database): SourceSession[] {
-  return db
-    .prepare<SourceSession, []>(
-      `SELECT id, project_id, parent_id, title, directory, time_created, time_updated
-       FROM session WHERE time_archived IS NULL ORDER BY time_created`
-    )
-    .all();
-}
-
-export function getSession(db: Database, sessionId: string): SourceSession | null {
-  return (
-    db
-      .prepare<SourceSession, [string]>(
-        `SELECT id, project_id, parent_id, title, directory, time_created, time_updated
-         FROM session WHERE id = ?`
-      )
-      .get(sessionId) ?? null
-  );
-}
-
-// JSON.parse returns `any`; these guards validate shape at runtime so no type
-// assertion is needed. Malformed rows degrade gracefully (unknown type/role) —
-// including a corrupt `data` blob whose JSON.parse throws, so one bad row can't
-// abort the whole transcript read.
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
-}
-
-function safeParse(data: string): unknown {
+// JSON.parse throws on malformed input; return undefined so the blob schema's
+// `.catch` fallback applies (one bad blob can't abort a transcript read).
+function safeJsonParse(data: string): unknown {
   try {
     return JSON.parse(data);
   } catch {
@@ -73,39 +82,48 @@ function safeParse(data: string): unknown {
   }
 }
 
-function parsePart(data: string): SourcePart {
-  const raw = safeParse(data);
-  if (!isRecord(raw)) return { type: "unknown" };
-  return {
-    type: typeof raw.type === "string" ? raw.type : "unknown",
-    text: typeof raw.text === "string" ? raw.text : undefined,
-    tool: typeof raw.tool === "string" ? raw.tool : undefined,
-  };
+export function listSessions(db: Database): SourceSession[] {
+  const rows = db
+    .prepare(
+      `SELECT id, project_id, parent_id, title, directory, time_created, time_updated
+       FROM session WHERE time_archived IS NULL ORDER BY time_created`
+    )
+    .all();
+  return SessionRowSchema.array().parse(rows);
 }
 
-function parseRole(data: string): string {
-  const raw = safeParse(data);
-  return isRecord(raw) && typeof raw.role === "string" ? raw.role : "unknown";
+export function getSession(db: Database, sessionId: string): SourceSession | null {
+  const row = db
+    .prepare(
+      `SELECT id, project_id, parent_id, title, directory, time_created, time_updated
+       FROM session WHERE id = ?`
+    )
+    .get(sessionId);
+  return row === null || row === undefined ? null : SessionRowSchema.parse(row);
 }
 
 export function getTranscript(db: Database, sessionId: string): SourceMessage[] {
-  const messages = db
-    .prepare<{ id: string; time_created: number; data: string }, [string]>(
-      `SELECT id, time_created, data FROM message
-       WHERE session_id = ? ORDER BY time_created, id`
-    )
-    .all(sessionId);
+  const messages = MessageRowSchema.array().parse(
+    db
+      .prepare(
+        `SELECT id, time_created, data FROM message
+         WHERE session_id = ? ORDER BY time_created, id`
+      )
+      .all(sessionId)
+  );
 
-  const parts = db
-    .prepare<{ message_id: string; data: string }, [string]>(
-      `SELECT message_id, data FROM part
-       WHERE session_id = ? ORDER BY time_created, id`
-    )
-    .all(sessionId);
+  const parts = PartRowSchema.array().parse(
+    db
+      .prepare(
+        `SELECT message_id, data FROM part
+         WHERE session_id = ? ORDER BY time_created, id`
+      )
+      .all(sessionId)
+  );
 
   const partsByMsg = new Map<string, SourcePart[]>();
   for (const p of parts) {
-    const d = parsePart(p.data);
+    const d = PartDataSchema.parse(safeJsonParse(p.data));
     let list = partsByMsg.get(p.message_id);
     if (!list) partsByMsg.set(p.message_id, (list = []));
     list.push(d);
@@ -113,7 +131,7 @@ export function getTranscript(db: Database, sessionId: string): SourceMessage[] 
 
   return messages.map((m) => ({
     id: m.id,
-    role: parseRole(m.data),
+    role: MessageDataSchema.parse(safeJsonParse(m.data)).role,
     timeCreated: m.time_created,
     parts: partsByMsg.get(m.id) ?? [],
   }));
