@@ -17,6 +17,8 @@ Semantic search over past OpenCode conversations via native plugin tools.
 - `skills/remembering-conversations/SKILL.md` — recall-behavior skill
 - `docs/embedding-model-eval.md` — model survey + empirical eval behind the
   snowflake choice
+- `docs/alternatives.md` — comparison with other OpenCode memory plugins
+  (opencode-mem, codemem, memsearch, ...) and why this one exists
 - `eval/` — reusable model-comparison harness; private inputs/outputs
   (`queries.ts`, `corpus.json`, `results-*`) live in `eval/private/`, which is
   gitignored wholesale — drop any new private artifact there, no gitignore

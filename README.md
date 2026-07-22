@@ -8,6 +8,10 @@ rebuilt for OpenCode primitives — native plugin tools instead of an MCP server
 plugin events instead of hooks, and OpenCode's own session database as the
 source.
 
+Wondering how this compares to opencode-mem, codemem, memsearch, and the rest
+of the OpenCode memory-plugin landscape? See
+[docs/alternatives.md](docs/alternatives.md).
+
 ## How it works
 
 1. **Read** — sessions/messages/parts from OpenCode's `~/.local/share/opencode/opencode.db` (read-only)
