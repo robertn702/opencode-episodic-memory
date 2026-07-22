@@ -52,7 +52,7 @@ conversations via native plugin tools.
   match), so it also fires on conversations that merely quote the phrase —
   including conversations about building this tool. `hasExcludeMarker()` in
   parser.ts also gates `episodic_read`/`read` (live transcript path), so a
-  markered chat is never returned verbatim.
+  marked chat is never returned verbatim.
 - Plugin API: use `tool()` helper from `@opencode-ai/plugin` (official docs).
   different-ai/openwork's skills (`opencode-primitives`, `create-plugin`) show
   an older default-export/zod-shape style and one was removed upstream while

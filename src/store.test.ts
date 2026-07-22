@@ -54,6 +54,7 @@ describe("store", () => {
     replaceSessionChunks(db, meta, [
       { seq: 0, time_created: 1000, text: "progress at 50% done", embedding: new Float32Array([1, 0]) },
       { seq: 1, time_created: 1001, text: "snake_case name here", embedding: new Float32Array([0, 1]) },
+      { seq: 2, time_created: 1002, text: "path \\tmp", embedding: new Float32Array([1, 0]) },
     ]);
     // % must match literally, not as a wildcard
     expect(textSearch(db, "50%").map((h) => h.text)).toEqual(["progress at 50% done"]);
@@ -62,6 +63,9 @@ describe("store", () => {
     // a bare % should NOT match everything (would if unescaped)
     expect(textSearch(db, "%")).toHaveLength(1);
     expect(textSearch(db, "_")).toHaveLength(1);
+    // a literal backslash must match only the row containing one — escapeLike
+    // escapes the escape char itself, so this would break if that were missed
+    expect(textSearch(db, "\\").map((h) => h.text)).toEqual(["path \\tmp"]);
     // search() text filter should also escape
     expect(search(db, new Float32Array([1, 0]), { text: "50%" })).toHaveLength(1);
   });

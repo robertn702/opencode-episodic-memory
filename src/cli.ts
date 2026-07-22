@@ -31,7 +31,14 @@ function positional(): string[] {
   for (let i = 0; i < rest.length; i++) {
     const t = rest[i];
     if (t.startsWith("--")) {
-      if (VALUE_FLAGS.has(t)) i++; // only value flags consume the next token
+      if (VALUE_FLAGS.has(t)) {
+        const next = rest[i + 1];
+        if (next === undefined || next.startsWith("--")) {
+          console.error(`error: ${t} requires a value`);
+          process.exit(1);
+        }
+        i++; // only value flags consume the next token
+      }
       continue;
     }
     out.push(t);
