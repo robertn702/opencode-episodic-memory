@@ -9,10 +9,13 @@ const key = process.argv[2];
 const cfg = MODELS.find((m) => m.key === key);
 if (!cfg) { console.error("unknown model", key); process.exit(1); }
 
-const here = new URL(".", import.meta.url).pathname;
-const corpus = JSON.parse(await Bun.file(here + "corpus.json").text()) as {
+interface CorpusChunk {
   session_id: string; seq: number; time_created: number; title: string; directory: string; text: string;
-}[];
+}
+const here = new URL(".", import.meta.url).pathname;
+const parsedCorpus: unknown = JSON.parse(await Bun.file(here + "corpus.json").text());
+if (!Array.isArray(parsedCorpus)) throw new Error("corpus.json is not a JSON array");
+const corpus: CorpusChunk[] = parsedCorpus;
 
 // ---- embedder setup ----
 type EmbedFn = (texts: string[]) => Promise<Float32Array[]>;
@@ -25,14 +28,16 @@ if (cfg.autoModelSentenceEmbedding) {
     const inputs = await tokenizer(texts.map((t) => t.slice(0, MAX_CHARS)), { padding: true, truncation: true });
     const { sentence_embedding } = await model(inputs);
     const dims: number = sentence_embedding.dims.at(-1);
+    // .data is a DataArray union; the sentence_embedding output is Float32 at runtime.
     const flat = new Float32Array(sentence_embedding.data as Float32Array);
     return texts.map((_, i) => flat.subarray(i * dims, (i + 1) * dims));
   };
 } else {
   const extractor = await pipeline("feature-extraction", cfg.repo, { dtype: cfg.dtype });
   embedRaw = async (texts) => {
-    const out = await extractor(texts.map((t) => t.slice(0, MAX_CHARS)), { pooling: cfg.pooling as "mean", normalize: true });
+    const out = await extractor(texts.map((t) => t.slice(0, MAX_CHARS)), { pooling: cfg.pooling, normalize: true });
     const dims: number = out.dims.at(-1);
+    // out.data is a DataArray union; a normalized feature-extraction tensor is Float32.
     const flat = new Float32Array(out.data as Float32Array);
     return texts.map((_, i) => flat.subarray(i * dims, (i + 1) * dims));
   };

@@ -81,7 +81,7 @@ export async function syncAll(
 // query in syncAll; omitted, it re-reads the source.
 export function pruneOrphans(source: Database, index: Database, knownSource?: SourceSession[]): number {
   const sourceIds = new Set((knownSource ?? listSessions(source)).map((s) => s.id));
-  const indexedIds = index.prepare("SELECT id FROM sessions").all() as { id: string }[];
+  const indexedIds = index.prepare<{ id: string }, []>("SELECT id FROM sessions").all();
   let pruned = 0;
   for (const { id } of indexedIds) {
     if (sourceIds.has(id)) continue;

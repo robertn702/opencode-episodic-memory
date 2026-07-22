@@ -8,11 +8,14 @@ import { syncSession, syncAll, pruneOrphans } from "../src/indexer";
 import { embedQuery } from "../src/embed";
 import { hasExcludeMarker } from "../src/parser";
 
-const dateMs = (s?: string): number | { error: string } | undefined => {
-  if (!s) return undefined;
+// Discriminated result so callers handle the parse error explicitly (no cast to
+// strip the error arm off a union). `ms` is undefined when no date was given.
+type ParsedDate = { ok: true; ms?: number } | { ok: false; error: string };
+const parseDateArg = (s?: string): ParsedDate => {
+  if (!s) return { ok: true };
   const ms = new Date(s).getTime();
-  if (Number.isNaN(ms)) return { error: `Invalid date "${s}" (expected YYYY-MM-DD).` };
-  return ms;
+  if (Number.isNaN(ms)) return { ok: false, error: `Invalid date "${s}" (expected YYYY-MM-DD).` };
+  return { ok: true, ms };
 };
 const fmtDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
@@ -56,8 +59,8 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
   return {
     event: async ({ event }) => {
       if (event.type === "session.idle") {
-        const sessionId = (event.properties as { sessionID?: string } | undefined)?.sessionID;
-        reindex(sessionId); // fire-and-forget; never block the session
+        // event is narrowed to EventSessionIdle here; properties.sessionID is typed.
+        reindex(event.properties.sessionID); // fire-and-forget; never block the session
       }
     },
 
@@ -75,14 +78,14 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
         },
         async execute(args) {
           const index = openIndex();
-          const after = dateMs(args.after);
-          if (after && typeof after === "object") return after.error;
-          const before = dateMs(args.before);
-          if (before && typeof before === "object") return before.error;
+          const after = parseDateArg(args.after);
+          if (!after.ok) return after.error;
+          const before = parseDateArg(args.before);
+          if (!before.ok) return before.error;
           const opts = {
             limit: Math.min(Math.max(args.limit ?? 10, 1), 50),
-            after: after as number | undefined,
-            before: before as number | undefined,
+            after: after.ms,
+            before: before.ms,
             text: args.text,
           };
           const hits =
@@ -90,7 +93,7 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
               ? textSearch(index, args.query, opts)
               : search(index, (await embedQuery(args.query))[0], opts);
           if (hits.length === 0) {
-            const chunkCount = (index.prepare("SELECT COUNT(*) n FROM chunks").get() as { n: number }).n;
+            const chunkCount = index.prepare<{ n: number }, []>("SELECT COUNT(*) n FROM chunks").get()?.n ?? 0;
             if (chunkCount === 0) return "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations.";
             return "No matching past conversations found.";
           }
@@ -140,8 +143,8 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
           }
           const index = openIndex();
           const rows = index
-            .prepare("SELECT text FROM chunks WHERE session_id = ? ORDER BY seq")
-            .all(args.session_id) as { text: string }[];
+            .prepare<{ text: string }, [string]>("SELECT text FROM chunks WHERE session_id = ? ORDER BY seq")
+            .all(args.session_id);
           if (rows.length === 0) return `No conversation found for session ${args.session_id}.`;
           return `(indexed excerpts — live session unavailable)\n\n${rows.map((r) => r.text).join("\n\n---\n\n")}`.slice(0, 50000);
         },
