@@ -7,6 +7,11 @@ import { z } from "zod";
 
 export const DEFAULT_SOURCE_DB = join(homedir(), ".local/share/opencode/opencode.db");
 
+// Opt-out marker. Matched as a BARE SUBSTRING anywhere in any message part —
+// broader than upstream's full instruction-tag match, so it also fires on
+// conversations that merely quote the phrase. Re-exported by parser.ts.
+export const EXCLUDE_MARKER = "DO NOT INDEX THIS CHAT";
+
 // --- Validation strategy ----------------------------------------------------
 // Two surfaces, two failure modes (see AGENTS.md):
 //   1. Structural rows we SELECT from opencode.db (columns: id, time_created,
@@ -42,6 +47,9 @@ const PartRowSchema = z.object({
   message_id: z.string(),
   data: z.string(),
 });
+
+// Aggregate row for the raw marker scan (structural: throw on drift).
+const MarkerCountSchema = z.object({ n: z.number() });
 
 // --- JSON blob schemas (degrade to "unknown" on mismatch) -------------------
 const PartDataSchema = z
@@ -100,6 +108,24 @@ export function getSession(db: Database, sessionId: string): SourceSession | nul
     )
     .get(sessionId);
   return row === null || row === undefined ? null : SessionRowSchema.parse(row);
+}
+
+// AUTHORITATIVE exclusion check: bare-substring match over the RAW `data`
+// column of the session's part rows, with no JSON parsing. The parsed-text
+// scan (parser.ts hasExcludeMarker) can miss the marker when a part blob fails
+// to parse and degrades to text: undefined — the privacy kill-switch must not
+// depend on blob parseability. `instr` is an exact, case-sensitive substring
+// match (unlike LIKE, which is case-insensitive and has wildcard chars).
+export function transcriptHasMarker(db: Database, sessionId: string): boolean {
+  const row = MarkerCountSchema.parse(
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM part
+         WHERE session_id = ? AND instr(data, ?) > 0`
+      )
+      .get(sessionId, EXCLUDE_MARKER)
+  );
+  return row.n > 0;
 }
 
 export function getTranscript(db: Database, sessionId: string): SourceMessage[] {

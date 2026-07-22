@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { listSessions, getSession, getTranscript } from "./reader";
+import { listSessions, getSession, getTranscript, transcriptHasMarker, EXCLUDE_MARKER } from "./reader";
 
 // A minimal opencode.db mirroring only the columns reader.ts SELECTs. Writable
 // here so we can seed rows; the reader functions take a Database and never write.
@@ -135,5 +135,71 @@ describe("getTranscript (JSON blob degradation)", () => {
     // data NULL violates the row schema's z.string(); structural, so it throws.
     db.run("INSERT INTO message (id, session_id, time_created, data) VALUES ('m1', 'ses_a', 1, NULL)");
     expect(() => getTranscript(db, "ses_a")).toThrow();
+  });
+});
+
+describe("transcriptHasMarker (raw blob scan)", () => {
+  test("detects the marker in a well-formed text part", () => {
+    const db = makeSource();
+    addSession(db, { id: "ses_a" });
+    addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
+    addPart(db, "p1", "m1", "ses_a", 1, `{"type":"text","text":"note: ${EXCLUDE_MARKER}"}`);
+    expect(transcriptHasMarker(db, "ses_a")).toBe(true);
+  });
+
+  // Regression for issue #10: the parsed-text scan degrades this blob to
+  // text: undefined, so the marker is invisible to hasExcludeMarker — but the
+  // raw scan must still see it. The privacy kill-switch must not depend on
+  // blob parseability.
+  test("detects the marker inside a malformed/unparseable part blob", () => {
+    const db = makeSource();
+    addSession(db, { id: "ses_a" });
+    addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
+    addPart(db, "p1", "m1", "ses_a", 1, `{oops not json ${EXCLUDE_MARKER}`);
+
+    // Sanity: the parsed view really does lose the marker text.
+    const t = getTranscript(db, "ses_a");
+    expect(t[0].parts).toEqual([{ type: "unknown" }]);
+
+    expect(transcriptHasMarker(db, "ses_a")).toBe(true);
+  });
+
+  test("detects the marker in a blob whose fields all fail validation", () => {
+    const db = makeSource();
+    addSession(db, { id: "ses_a" });
+    addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
+    // Valid JSON, but type is non-string → degrades to {type:"unknown"}.
+    addPart(db, "p1", "m1", "ses_a", 1, `{"type":123,"note":"${EXCLUDE_MARKER}"}`);
+
+    const t = getTranscript(db, "ses_a");
+    expect(t[0].parts).toEqual([{ type: "unknown" }]);
+    expect(transcriptHasMarker(db, "ses_a")).toBe(true);
+  });
+
+  test("returns false when no part contains the marker", () => {
+    const db = makeSource();
+    addSession(db, { id: "ses_a" });
+    addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
+    addPart(db, "p1", "m1", "ses_a", 1, `{"type":"text","text":"hello"}`);
+    expect(transcriptHasMarker(db, "ses_a")).toBe(false);
+  });
+
+  test("is scoped to the requested session", () => {
+    const db = makeSource();
+    addSession(db, { id: "ses_a" });
+    addSession(db, { id: "ses_b" });
+    addMessage(db, "m1", "ses_b", 1, `{"role":"user"}`);
+    addPart(db, "p1", "m1", "ses_b", 1, `{"type":"text","text":"${EXCLUDE_MARKER}"}`);
+    expect(transcriptHasMarker(db, "ses_a")).toBe(false);
+    expect(transcriptHasMarker(db, "ses_b")).toBe(true);
+  });
+
+  test("does not match case variants or partial markers (exact substring)", () => {
+    const db = makeSource();
+    addSession(db, { id: "ses_a" });
+    addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
+    addPart(db, "p1", "m1", "ses_a", 1, `{"type":"text","text":"do not index this chat"}`);
+    addPart(db, "p2", "m1", "ses_a", 2, `{"type":"text","text":"DO NOT INDEX THIS"}`);
+    expect(transcriptHasMarker(db, "ses_a")).toBe(false);
   });
 });

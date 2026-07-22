@@ -1,13 +1,18 @@
 // Turn a raw transcript into condensed exchanges suitable for embedding.
 // Keeps user text, assistant text, and tool *names* (not tool output, which is
 // bulky and low-signal). Skips reasoning blobs and step markers.
-import type { SourceMessage, SourcePart } from "./reader";
+import { EXCLUDE_MARKER, type SourceMessage, type SourcePart } from "./reader";
 
-export const EXCLUDE_MARKER = "DO NOT INDEX THIS CHAT";
+// Defined in reader.ts (single source of truth); re-exported for existing
+// consumers of this module.
+export { EXCLUDE_MARKER };
 
-// True if any text part in the conversation contains the opt-out marker.
-// Used both at index time (skip embedding) and at read time (refuse to return
-// the transcript), so a markered chat is never surfaced verbatim.
+// Fast-path check over PARSED part text. Cheaper than the raw scan, but can
+// miss the marker when a part blob fails to parse and degrades to
+// text: undefined — the AUTHORITATIVE check is transcriptHasMarker() in
+// reader.ts, which substring-matches the raw `data` column. Callers that gate
+// privacy-sensitive paths should use the raw check; this remains useful for
+// parseTranscript's in-memory flow and tests.
 export function hasExcludeMarker(messages: SourceMessage[]): boolean {
   for (const m of messages) {
     for (const p of m.parts) {
