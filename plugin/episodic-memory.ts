@@ -3,25 +3,10 @@
 // - Incremental reindex on session.idle (fire-and-forget, debounced)
 import { type Plugin, tool } from "@opencode-ai/plugin";
 import { openSource, getSession, getTranscriptChecked } from "../src/reader";
-import { openIndex, search, textSearch } from "../src/store";
+import { openIndex, search, textSearch, isIndexEmpty } from "../src/store";
 import { syncSession, syncAll, pruneOrphans } from "../src/indexer";
 import { embedQuery } from "../src/embed";
-
-// Discriminated result so callers handle the parse error explicitly (no cast to
-// strip the error arm off a union). `ms` is undefined when no date was given.
-type ParsedDate = { ok: true; ms?: number } | { ok: false; error: string };
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// Require strict YYYY-MM-DD, then round-trip to reject impossible calendar dates
-// (`new Date("2024-02-31")` silently normalizes to March 2 rather than failing).
-const parseDateArg = (s?: string): ParsedDate => {
-  if (!s) return { ok: true };
-  const ms = new Date(s).getTime();
-  if (!DATE_RE.test(s) || Number.isNaN(ms) || new Date(ms).toISOString().slice(0, 10) !== s) {
-    return { ok: false, error: `Invalid date "${s}" (expected YYYY-MM-DD).` };
-  }
-  return { ok: true, ms };
-};
-const fmtDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+import { parseDateArg, formatHits, renderTranscript } from "../src/format";
 
 export const EpisodicMemory: Plugin = async ({ client }) => {
   const log = (level: "info" | "warn" | "error", message: string) =>
@@ -97,16 +82,10 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
               ? textSearch(index, args.query, opts)
               : search(index, (await embedQuery(args.query))[0], opts);
           if (hits.length === 0) {
-            const chunkCount = index.prepare<{ n: number }, []>("SELECT COUNT(*) n FROM chunks").get()?.n ?? 0;
-            if (chunkCount === 0) return "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations.";
+            if (isIndexEmpty(index)) return "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations.";
             return "No matching past conversations found.";
           }
-          return hits
-            .map((h) => {
-              const snippet = h.text.replace(/\s+/g, " ").slice(0, 400);
-              return `## ${fmtDate(h.time_created)} — ${h.title}\nsession: ${h.session_id}  score: ${h.score.toFixed(3)}\n${h.directory}\n> ${snippet}`;
-            })
-            .join("\n\n");
+          return formatHits(hits);
         },
       }),
 
@@ -129,20 +108,7 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
                 if (checked.excluded) {
                   return "Session is marked private (exclusion marker present); transcript withheld.";
                 }
-                const transcript = checked.messages;
-                const lines: string[] = [`# ${s.title}`, `${fmtDate(s.time_created)} — ${s.directory} — ${s.id}`, ""];
-                for (const m of transcript) {
-                  const text = m.parts
-                    .filter((p) => p.type === "text" && p.text)
-                    .map((p) => p.text)
-                    .join("\n");
-                  const tools = m.parts.filter((p) => p.type === "tool" && p.tool).map((p) => p.tool);
-                  if (!text && tools.length === 0) continue;
-                  lines.push(`## ${m.role}`);
-                  if (text) lines.push(text);
-                  if (tools.length) lines.push(`*(tools: ${tools.join(", ")})*`, "");
-                }
-                return lines.join("\n").slice(0, 50000);
+                return renderTranscript(s, checked.messages).slice(0, 50000);
               }
             } catch {
               // fall through to indexed copy

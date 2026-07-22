@@ -11,9 +11,10 @@
 //   doctor                         Diagnose setup
 import { existsSync } from "node:fs";
 import { openSource, sourceDbPath, getSession, getTranscriptChecked } from "./reader";
-import { openIndex, indexDbPath, search, textSearch, stats, type SearchHit } from "./store";
+import { openIndex, indexDbPath, search, textSearch, stats, isIndexEmpty } from "./store";
 import { syncAll } from "./indexer";
 import { embed, embedQuery } from "./embed";
+import { parseDateArg, fmtDate, renderTranscript, formatHits } from "./format";
 
 const [, , command, ...rest] = process.argv;
 
@@ -44,32 +45,12 @@ function positional(): string[] {
   }
   return out;
 }
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// Require strict YYYY-MM-DD, then round-trip to reject impossible calendar dates
-// (`new Date("2024-02-31")` silently normalizes to March 2 rather than failing).
-const dateMs = (s: string | null): number | undefined => {
-  if (!s) return undefined;
-  const ms = new Date(s).getTime();
-  if (!DATE_RE.test(s) || Number.isNaN(ms) || new Date(ms).toISOString().slice(0, 10) !== s) {
-    console.error(`error: invalid date "${s}" (expected YYYY-MM-DD)`);
-    process.exit(1);
-  }
-  return ms;
-};
-
-function fmtDate(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
-}
-
-function printHits(hits: SearchHit[]): void {
-  if (hits.length === 0) { console.log("No results."); return; }
-  for (const h of hits) {
-    const snippet = h.text.replace(/\s+/g, " ").slice(0, 220);
-    console.log(`## ${fmtDate(h.time_created)} — ${h.title}`);
-    console.log(`session: ${h.session_id}  score: ${h.score.toFixed(3)}`);
-    console.log(`${h.directory}`);
-    console.log(`> ${snippet}\n`);
-  }
+// Map the shared parseDateArg union onto CLI semantics: print the error and
+// exit non-zero. `flag()` yields null for an absent flag (→ no date filter).
+function dateArg(s: string | null): number | undefined {
+  const r = parseDateArg(s ?? undefined);
+  if (!r.ok) { console.error(`error: ${r.error}`); process.exit(1); }
+  return r.ms;
 }
 
 async function main() {
@@ -95,17 +76,19 @@ async function main() {
       const index = openIndex();
       const opts = {
         limit: Number(flag("limit") ?? 10),
-        after: dateMs(flag("after")),
-        before: dateMs(flag("before")),
+        after: dateArg(flag("after")),
+        before: dateArg(flag("before")),
       };
       const textFlag = flag("text");
       const hits = textFlag
         ? textSearch(index, textFlag, opts)
         : search(index, (await embedQuery(query))[0], opts);
-      if (hits.length === 0 && stats(index).chunks === 0) {
-        console.log("No results. The index is empty — run: bun run src/cli.ts sync");
+      if (hits.length === 0) {
+        console.log(isIndexEmpty(index)
+          ? "No results. The index is empty — run: bun run src/cli.ts sync"
+          : "No results.");
       } else {
-        printHits(hits);
+        console.log(formatHits(hits, 220));
       }
       break;
     }
@@ -132,17 +115,7 @@ async function main() {
         console.error("session is marked private (exclusion marker present); transcript withheld");
         process.exit(1);
       }
-      const transcript = checked.messages;
-      console.log(`# ${s.title}\n${fmtDate(s.time_created)} — ${s.directory} — ${s.id}\n`);
-      for (const m of transcript) {
-        const text = m.parts.filter((p) => p.type === "text" && p.text).map((p) => p.text).join("\n");
-        const tools = m.parts.filter((p) => p.type === "tool" && p.tool).map((p) => p.tool);
-        if (!text && tools.length === 0) continue;
-        console.log(`## ${m.role}`);
-        if (text) console.log(text);
-        if (tools.length) console.log(`*(tools: ${tools.join(", ")})*`);
-        console.log();
-      }
+      console.log(renderTranscript(s, checked.messages));
       break;
     }
 
