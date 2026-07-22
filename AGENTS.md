@@ -1,0 +1,63 @@
+# opencode-episodic-memory — agent context
+
+Port of obra/episodic-memory to OpenCode. Semantic search over past OpenCode
+conversations via native plugin tools.
+
+## Layout
+
+- `src/reader.ts` — read-only access to `~/.local/share/opencode/opencode.db`
+  (session/message/part tables, JSON blobs in `data`; schema verified 2026-07-22)
+- `src/parser.ts` — transcript → condensed exchanges; exclusion marker handling
+- `src/embed.ts` — Transformers.js singleton, mean-pooled normalized embeddings
+- `src/store.ts` — index SQLite DB, brute-force cosine search (**the** swap point
+  if an ANN index is ever needed)
+- `src/indexer.ts` — incremental sync, watermark = `session.time_updated`
+- `src/cli.ts` — `bun run src/cli.ts sync|search|read|stats|doctor`
+- `plugin/episodic-memory.ts` — OpenCode plugin (tools + `session.idle` reindex)
+- `skills/remembering-conversations/SKILL.md` — recall-behavior skill
+- `docs/embedding-model-eval.md` — model survey + empirical eval behind the
+  snowflake choice
+- `eval/` — reusable model-comparison harness (`queries.ts`/`corpus.json`/
+  `results-*` are gitignored: private data); see its README
+- Tests: `bun test` (parser + store smoke tests); `bun run typecheck`
+- `spikes/` — Phase 0 verification + plugin harness (run with `bun run`)
+- `.opencode/skills/create-plugin/` — vendored from different-ai/openwork
+
+## Hard-won facts (don't rediscover)
+
+- Embedding model is **`Snowflake/snowflake-arctic-embed-m-v1.5` (q8, CLS pooling)**
+  with the BGE-style query prefix on queries only (Snowflake uses the identical
+  prompt). Chosen by empirical eval on our real corpus over bge-small-en-v1.5, nomic
+  v1.5, gte-modernbert, granite-r2, embeddinggemma — see
+  `docs/embedding-model-eval.md`. Key win: negatives score ≤ ~0.33 vs bge's ~0.66,
+  so minScore thresholding is viable. Score scale: true hits ~0.4–0.73, median ~0.56.
+  Pooling MUST be `cls` for this model, not `mean`. Xenova mirrors of nomic/snowflake
+  401 now — use official repos' own ONNX exports.
+- Truncate embedded text at 2000 chars (upstream measured quality peaks there);
+  the stored chunk text may be longer for display, embed.ts truncates.
+- Sync prunes index sessions that no longer exist in the source DB (deleted
+  conversations would otherwise linger with stale-model embeddings), and search
+  skips embedding rows whose byteLength ≠ dims×4 — a mixed-model index can never
+  crash or corrupt search. Both bugs were found during the bge→snowflake
+  migration (12 orphaned 384-dim chunks crashed a 768-dim query).
+- **`bun:sqlite` does not support dynamic extension loading** — sqlite-vec cannot
+  work inside OpenCode plugins. Hence brute-force cosine over Float32 blobs.
+- OpenCode sessions live in one SQLite DB (WAL mode; concurrent read-only access
+  is safe), NOT JSONL transcripts like Claude Code.
+- Plugin runs inside OpenCode's Bun runtime — no native deps, no postinstall
+  assumptions. `@huggingface/transformers` + `onnxruntime-node` works but its
+  postinstall must be trusted: `bun pm trust onnxruntime-node protobufjs`.
+- The `DO NOT INDEX THIS CHAT` exclusion marker also matches conversations that
+  quote it — including conversations about building this tool (mirrors upstream).
+- Plugin API: use `tool()` helper from `@opencode-ai/plugin` (official docs).
+  The vendored create-plugin skill shows an older default-export/zod-shape style;
+  the official style is what's implemented here.
+- different-ai/openwork's `opencode-primitives` skill no longer exists upstream
+  (removed; skills.sh serves a stale snapshot). `create-plugin` is the live one.
+
+## Conventions
+
+- Verify empirically before building (see `spikes/`); run
+  `bun run spikes/plugin-harness.ts` after changing the plugin.
+- Reindex manually with `bun run src/cli.ts sync` (idempotent; watermark-based).
+- Config is env-var only (`EPISODIC_*`), no config file yet (YAGNI).

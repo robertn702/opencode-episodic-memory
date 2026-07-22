@@ -1,0 +1,52 @@
+import { describe, test, expect, afterAll } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openIndex, replaceSessionChunks, search, textSearch, getIndexedSession } from "./store";
+
+const dir = mkdtempSync(join(tmpdir(), "episodic-store-test-"));
+const db = openIndex(join(dir, "index.db"));
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+const meta = {
+  id: "ses_test", project_id: "p", parent_id: null,
+  title: "Test session", directory: "/tmp",
+  time_created: 1000, source_time_updated: 1000,
+};
+
+describe("store", () => {
+  test("replaceSessionChunks + search round-trip ranks by cosine", () => {
+    replaceSessionChunks(db, meta, [
+      { seq: 0, time_created: 1000, text: "alpha chunk", embedding: new Float32Array([1, 0]) },
+      { seq: 1, time_created: 1001, text: "beta chunk", embedding: new Float32Array([0, 1]) },
+    ]);
+    const hits = search(db, new Float32Array([1, 0]));
+    expect(hits).toHaveLength(2);
+    expect(hits[0].text).toBe("alpha chunk");
+    expect(hits[0].score).toBeCloseTo(1);
+    expect(hits[1].score).toBeCloseTo(0);
+    expect(getIndexedSession(db, "ses_test")?.title).toBe("Test session");
+  });
+
+  test("search skips embeddings with mismatched dims instead of crashing", () => {
+    // 4-byte blob while the query is 2 dims (8 bytes) — must be skipped.
+    db.run("INSERT INTO chunks (session_id, seq, time_created, text, embedding) VALUES (?, ?, ?, ?, ?)",
+      ["ses_test", 99, 1002, "stale wrong-dims chunk", new Float32Array([0.5])]);
+    const hits = search(db, new Float32Array([1, 0]));
+    expect(hits.map((h) => h.text)).not.toContain("stale wrong-dims chunk");
+    expect(hits).toHaveLength(2);
+  });
+
+  test("re-embedding a session replaces its chunks", () => {
+    replaceSessionChunks(db, meta, [
+      { seq: 0, time_created: 1000, text: "only chunk now", embedding: new Float32Array([1, 0]) },
+    ]);
+    const hits = search(db, new Float32Array([1, 0]));
+    expect(hits.map((h) => h.text)).toEqual(["only chunk now"]);
+  });
+
+  test("textSearch does exact substring matching", () => {
+    expect(textSearch(db, "only chunk")).toHaveLength(1);
+    expect(textSearch(db, "no such phrase")).toHaveLength(0);
+  });
+});

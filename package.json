@@ -1,0 +1,49 @@
+{
+  "name": "opencode-episodic-memory",
+  "version": "0.1.0",
+  "description": "Semantic search over past OpenCode conversations. Port of obra/episodic-memory to OpenCode primitives.",
+  "type": "module",
+  "license": "MIT",
+  "author": "robertn702",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/robertn702/opencode-episodic-memory"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "episodic-memory",
+    "semantic-search",
+    "embeddings",
+    "transformersjs"
+  ],
+  "exports": {
+    ".": "./plugin/episodic-memory.ts",
+    "./cli": "./src/cli.ts"
+  },
+  "files": [
+    "plugin",
+    "src",
+    "skills"
+  ],
+  "bin": {
+    "opencode-episodic": "./src/cli.ts"
+  },
+  "scripts": {
+    "spike": "bun run spikes/spike.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.5.2"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  },
+  "trustedDependencies": [
+    "onnxruntime-node",
+    "protobufjs"
+  ]
+}

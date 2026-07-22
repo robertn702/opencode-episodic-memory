@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+.scratch/
+.context/
+
+# eval data is private (your own conversation history); only code is committed
+/eval/queries.ts
+/eval/corpus.json
+/eval/results-*.json
+
