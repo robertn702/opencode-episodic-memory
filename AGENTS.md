@@ -71,4 +71,6 @@ Semantic search over past OpenCode conversations via native plugin tools.
   pre-bump and compare cosine post-bump before assuming existing indexes stay
   valid (v3↔v4 happened to be identical; don't assume that holds).
 - Reindex manually with `bun run src/cli.ts sync` (idempotent; watermark-based).
+- Releases follow `docs/RELEASE.md`; the artifact gate is
+  `bash spikes/pack-smoke.sh` (pack → clean install → import → embed).
 - Config is env-var only (`EPISODIC_*`), no config file yet (YAGNI).

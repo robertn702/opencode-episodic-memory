@@ -32,7 +32,8 @@
   "scripts": {
     "spike": "bun run spikes/spike.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run typecheck && bun test"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
