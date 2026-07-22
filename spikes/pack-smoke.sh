@@ -30,6 +30,12 @@ if (typeof m.EpisodicMemory !== 'function') throw new Error('EpisodicMemory expo
 console.log('exports ok:', Object.keys(m).join(', '));
 ")
 
+echo "== opencode server-entrypoint resolution =="
+# Mirrors the resolution OpenCode's plugin loader performs (./server export,
+# then main). Without this, a package can import fine yet be silently skipped
+# by OpenCode. Run against the clean-installed artifact, not the repo source.
+bun run spikes/verify-opencode-entrypoint.ts "$WORK/cache/node_modules/opencode-episodic-memory"
+
 echo "== embed smoke (downloads ~110MB model on first run) =="
 (cd "$WORK/cache" && bun -e "
 const { embedQuery } = await import('./node_modules/opencode-episodic-memory/src/embed.ts');

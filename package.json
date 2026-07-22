@@ -1,6 +1,6 @@
 {
   "name": "opencode-episodic-memory",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Semantic search over past OpenCode conversations. Port of obra/episodic-memory to OpenCode primitives.",
   "type": "module",
   "license": "MIT",
@@ -17,6 +17,7 @@
     "embeddings",
     "transformersjs"
   ],
+  "main": "./plugin/episodic-memory.ts",
   "exports": {
     ".": "./plugin/episodic-memory.ts",
     "./cli": "./src/cli.ts"
@@ -33,7 +34,8 @@
     "spike": "bun run spikes/spike.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "bun run typecheck && bun test"
+    "verify:entrypoint": "bun run spikes/verify-opencode-entrypoint.ts",
+    "prepublishOnly": "bun run typecheck && bun test && bun run verify:entrypoint"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
