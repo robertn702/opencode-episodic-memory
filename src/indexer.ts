@@ -70,14 +70,24 @@ export async function syncAll(
 
   // Prune index rows whose session no longer exists in the source DB;
   // otherwise their stale (possibly wrong-dims) chunks linger forever.
-  const sourceIds = new Set(sessions.map((s) => s.id));
+  result.pruned = pruneOrphans(source, index, sessions);
+
+  return result;
+}
+
+// Delete index rows (sessions + chunks) whose session has been removed from the
+// source DB. Extracted so the plugin's full-reindex path can call it without
+// re-running the whole sync. Pass already-fetched sessions to avoid a redundant
+// query in syncAll; omitted, it re-reads the source.
+export function pruneOrphans(source: Database, index: Database, knownSource?: SourceSession[]): number {
+  const sourceIds = new Set((knownSource ?? listSessions(source)).map((s) => s.id));
   const indexedIds = index.prepare("SELECT id FROM sessions").all() as { id: string }[];
+  let pruned = 0;
   for (const { id } of indexedIds) {
     if (sourceIds.has(id)) continue;
     index.run("DELETE FROM chunks WHERE session_id = ?", [id]);
     index.run("DELETE FROM sessions WHERE id = ?", [id]);
-    result.pruned++;
+    pruned++;
   }
-
-  return result;
+  return pruned;
 }

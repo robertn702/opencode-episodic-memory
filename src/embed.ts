@@ -27,6 +27,9 @@ export function getEmbedder(): Promise<FeatureExtractionPipeline> {
     cached = pipeline("feature-extraction", process.env.EPISODIC_EMBED_MODEL ?? DEFAULT_MODEL, {
       dtype: "q8",
     }) as Promise<FeatureExtractionPipeline>;
+    // A rejected promise (e.g. failed model download) would poison the cache
+    // for the lifetime of the process; reset so the next call retries.
+    cached.catch(() => { if (cached) cached = null; });
   }
   return cached;
 }

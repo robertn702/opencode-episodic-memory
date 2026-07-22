@@ -14,6 +14,7 @@ import { openSource, sourceDbPath, getSession, getTranscript } from "./reader";
 import { openIndex, indexDbPath, search, textSearch, stats, type SearchHit } from "./store";
 import { syncAll } from "./indexer";
 import { embed, embedQuery } from "./embed";
+import { hasExcludeMarker } from "./parser";
 
 const [, , command, ...rest] = process.argv;
 
@@ -24,15 +25,35 @@ function flag(name: string): string | null {
 function hasFlag(name: string): boolean {
   return rest.includes(`--${name}`);
 }
+const VALUE_FLAGS = new Set(["--text", "--after", "--before", "--limit"]);
 function positional(): string[] {
   const out: string[] = [];
   for (let i = 0; i < rest.length; i++) {
-    if (rest[i].startsWith("--")) { i++; continue; }
-    out.push(rest[i]);
+    const t = rest[i];
+    if (t.startsWith("--")) {
+      if (VALUE_FLAGS.has(t)) {
+        const next = rest[i + 1];
+        if (next === undefined || next.startsWith("--")) {
+          console.error(`error: ${t} requires a value`);
+          process.exit(1);
+        }
+        i++; // only value flags consume the next token
+      }
+      continue;
+    }
+    out.push(t);
   }
   return out;
 }
-const dateMs = (s: string | null) => (s ? new Date(s).getTime() : undefined);
+const dateMs = (s: string | null): number | undefined => {
+  if (!s) return undefined;
+  const ms = new Date(s).getTime();
+  if (Number.isNaN(ms)) {
+    console.error(`error: invalid date "${s}" (expected YYYY-MM-DD)`);
+    process.exit(1);
+  }
+  return ms;
+};
 
 function fmtDate(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
@@ -79,7 +100,11 @@ async function main() {
       const hits = textFlag
         ? textSearch(index, textFlag, opts)
         : search(index, (await embedQuery(query))[0], opts);
-      printHits(hits);
+      if (hits.length === 0 && stats(index).chunks === 0) {
+        console.log("No results. The index is empty — run: bun run src/cli.ts sync");
+      } else {
+        printHits(hits);
+      }
       break;
     }
 
@@ -98,8 +123,13 @@ async function main() {
       const source = openSource();
       const s = getSession(source, id);
       if (!s) { console.error("session not found:", id); process.exit(1); }
+      const transcript = getTranscript(source, id);
+      if (hasExcludeMarker(transcript)) {
+        console.error("session is marked private (exclusion marker present); transcript withheld");
+        process.exit(1);
+      }
       console.log(`# ${s.title}\n${fmtDate(s.time_created)} — ${s.directory} — ${s.id}\n`);
-      for (const m of getTranscript(source, id)) {
+      for (const m of transcript) {
         const text = m.parts.filter((p) => p.type === "text" && p.text).map((p) => p.text).join("\n");
         const tools = m.parts.filter((p) => p.type === "tool" && p.tool).map((p) => p.tool);
         if (!text && tools.length === 0) continue;

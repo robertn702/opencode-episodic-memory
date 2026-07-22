@@ -5,6 +5,18 @@ import type { SourceMessage, SourcePart } from "./reader";
 
 export const EXCLUDE_MARKER = "DO NOT INDEX THIS CHAT";
 
+// True if any text part in the conversation contains the opt-out marker.
+// Used both at index time (skip embedding) and at read time (refuse to return
+// the transcript), so a markered chat is never surfaced verbatim.
+export function hasExcludeMarker(messages: SourceMessage[]): boolean {
+  for (const m of messages) {
+    for (const p of m.parts) {
+      if (p.text?.includes(EXCLUDE_MARKER)) return true;
+    }
+  }
+  return false;
+}
+
 export interface Exchange {
   user: string;
   assistant: string;
@@ -33,11 +45,7 @@ export function parseTranscript(messages: SourceMessage[]): {
   excluded: boolean;
 } {
   // Honor the opt-out marker anywhere in the conversation.
-  for (const m of messages) {
-    for (const p of m.parts) {
-      if (p.text?.includes(EXCLUDE_MARKER)) return { exchanges: [], excluded: true };
-    }
-  }
+  if (hasExcludeMarker(messages)) return { exchanges: [], excluded: true };
 
   const exchanges: Exchange[] = [];
   let current: Exchange | null = null;
@@ -59,8 +67,10 @@ export function parseTranscript(messages: SourceMessage[]): {
   return { exchanges: exchanges.filter((e) => e.user || e.assistant), excluded: false };
 }
 
-// Text that actually gets embedded for one exchange. Capped because MiniLM's
-// window is 256 tokens; the head of an exchange carries the most signal.
+// Text stored per chunk (also displayed by episodic_read). Capped at 4000 chars
+// to keep storage sane; the embedding step (embed.ts) further truncates to 2000
+// chars where retrieval quality peaks. The head of an exchange carries the
+// most signal.
 export function exchangeText(sessionTitle: string, date: string, e: Exchange): string {
   const tools = e.tools.length ? `\nTools used: ${[...new Set(e.tools)].join(", ")}` : "";
   const body = `User: ${e.user}\nAssistant: ${e.assistant}${tools}`;
