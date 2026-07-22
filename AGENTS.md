@@ -53,6 +53,9 @@ Semantic search over past OpenCode conversations via native plugin tools.
   **JSON `data` blobs** (message role, part contents) **degrade per-row** to
   `"unknown"`/`undefined` via `.catch()`, so one corrupt or unfamiliar blob can't
   abort a whole transcript read (the parser already filters unknown types/roles).
+  Because `getTranscript` throws on structural drift and `syncAll` calls it
+  per-session, a structural drift aborts the whole bulk sync (all-or-nothing) —
+  intentional fail-loud; the plugin's `session.idle` reindex catches and logs it.
   The index DB (`store.ts`) deliberately stays on `db.prepare<T>()` typed casts —
   we own that schema end to end, so runtime validation adds no value there. Keep
   the no-`as` rule: narrow via schemas, never assertions (the two documented

@@ -67,6 +67,16 @@ describe("listSessions / getSession (structural rows)", () => {
     );
     expect(() => listSessions(db)).toThrow();
   });
+
+  test("getSession throws on a drifted session row for an existing id", () => {
+    const db = makeSource();
+    // title NULL violates z.string() — simulates OpenCode schema drift.
+    db.run(
+      `INSERT INTO session (id, project_id, parent_id, title, directory, time_created, time_updated, time_archived)
+       VALUES ('ses_y', 'p', NULL, NULL, '/d', 1000, 1000, NULL)`
+    );
+    expect(() => getSession(db, "ses_y")).toThrow();
+  });
 });
 
 describe("getTranscript (JSON blob degradation)", () => {
@@ -96,6 +106,27 @@ describe("getTranscript (JSON blob degradation)", () => {
       { type: "unknown", text: "keep" },
     ]);
     expect(t[3].parts).toEqual([{ type: "unknown" }]);
+  });
+
+  test("per-field catch: bad text/tool fields are dropped, type is preserved", () => {
+    const db = makeSource();
+    addSession(db, { id: "ses_a" });
+    addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
+    addPart(db, "p1", "m1", "ses_a", 1, `{"type":"text","text":123}`); // bad text dropped
+    addPart(db, "p2", "m1", "ses_a", 2, `{"type":"tool","tool":123}`); // bad tool dropped
+
+    const t = getTranscript(db, "ses_a");
+    expect(t[0].parts).toEqual([{ type: "text" }, { type: "tool" }]);
+  });
+
+  test("throws when a part row's data column is non-string (structural drift)", () => {
+    const db = makeSource();
+    addSession(db, { id: "ses_a" });
+    // Valid message first so the message-row parse passes and the throw comes
+    // from the part row below.
+    addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
+    db.run("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES ('p1', 'm1', 'ses_a', 1, NULL)");
+    expect(() => getTranscript(db, "ses_a")).toThrow();
   });
 
   test("throws when a message row's data column is non-string (structural drift)", () => {
