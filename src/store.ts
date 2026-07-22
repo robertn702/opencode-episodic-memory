@@ -106,28 +106,42 @@ export interface SearchOptions {
   minScore?: number;
 }
 
-export function search(db: Database, queryVec: Float32Array, opts: SearchOptions = {}): SearchHit[] {
-  const limit = opts.limit ?? 10;
+// A scored candidate before display fields are fetched (phase 1 output).
+interface ScoredChunk {
+  session_id: string;
+  seq: number;
+  time_created: number;
+  score: number;
+}
+
+// Build the shared WHERE clause for the candidate scan. `after`/`before` use
+// `!== undefined` (not truthiness) so a legitimate epoch-0 bound isn't dropped
+// as "absent". `text` keeps a truthiness check: an empty substring filter is a
+// no-op, not a match-everything `LIKE '%%'`.
+function candidateWhere(opts: SearchOptions): { where: string; params: (string | number)[] } {
   const clauses: string[] = [];
   const params: (string | number)[] = [];
-  if (opts.after) { clauses.push("c.time_created >= ?"); params.push(opts.after); }
-  if (opts.before) { clauses.push("c.time_created < ?"); params.push(opts.before); }
+  if (opts.after !== undefined) { clauses.push("c.time_created >= ?"); params.push(opts.after); }
+  if (opts.before !== undefined) { clauses.push("c.time_created < ?"); params.push(opts.before); }
   if (opts.text) { clauses.push("c.text LIKE ? ESCAPE '\\'"); params.push(`%${escapeLike(opts.text)}%`); }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+}
 
-  const rows = db
-    .prepare<{
-      session_id: string; seq: number; time_created: number; text: string;
-      embedding: Uint8Array; title: string; directory: string;
-    }, (string | number)[]>(
-      `SELECT c.session_id, c.seq, c.time_created, c.text, c.embedding, s.title, s.directory
-       FROM chunks c JOIN sessions s ON s.id = c.session_id ${where}`
+// Phase 1: score every candidate chunk by cosine against the query, apply the
+// filters + minScore, and return them sorted best-first. Reads only the
+// embedding blob (not the bulky text/title/directory), so the per-query cost is
+// dims arithmetic, not full-row materialization.
+function scoreVector(db: Database, queryVec: Float32Array, opts: SearchOptions): ScoredChunk[] {
+  const { where, params } = candidateWhere(opts);
+  const candidates = db
+    .prepare<{ session_id: string; seq: number; time_created: number; embedding: Uint8Array }, (string | number)[]>(
+      `SELECT c.session_id, c.seq, c.time_created, c.embedding FROM chunks c ${where}`
     )
     .all(...params);
 
   const dims = queryVec.length;
   const minScore = opts.minScore ?? 0;
-  return rows
+  return candidates
     // Skip vectors from a different embedding model (e.g. mid-migration or
     // orphaned rows) — a dims mismatch would corrupt the dot product or throw.
     .filter((r) => r.embedding.byteLength === dims * 4)
@@ -135,22 +149,47 @@ export function search(db: Database, queryVec: Float32Array, opts: SearchOptions
       const v = new Float32Array(r.embedding.buffer, r.embedding.byteOffset, dims);
       let dot = 0;
       for (let i = 0; i < dims; i++) dot += queryVec[i] * v[i];
-      return {
-        session_id: r.session_id, seq: r.seq, time_created: r.time_created,
-        text: r.text, score: dot, title: r.title, directory: r.directory,
-      };
+      return { session_id: r.session_id, seq: r.seq, time_created: r.time_created, score: dot };
     })
     .filter((h) => h.score >= minScore)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+    .sort((a, b) => b.score - a.score);
+}
+
+// Phase 2: fetch display fields (text/title/directory) only for the winners —
+// a point lookup per hit on the (session_id, seq) primary key. K is bounded by
+// the caller's limit (≤ 50 in the plugin), so this is a tiny handful of reads.
+function hydrate(db: Database, scored: ScoredChunk[]): SearchHit[] {
+  const detail = db.prepare<{ text: string; title: string; directory: string }, [string, number]>(
+    `SELECT c.text, s.title, s.directory
+     FROM chunks c JOIN sessions s ON s.id = c.session_id
+     WHERE c.session_id = ? AND c.seq = ?`
+  );
+  const hits: SearchHit[] = [];
+  for (const h of scored) {
+    const d = detail.get(h.session_id, h.seq);
+    // Inner-join semantics: skip a chunk whose session row is gone (shouldn't
+    // happen — replaceSessionChunks/pruneOrphans keep chunks and sessions in
+    // lockstep).
+    if (!d) continue;
+    hits.push({
+      session_id: h.session_id, seq: h.seq, time_created: h.time_created,
+      text: d.text, score: h.score, title: d.title, directory: d.directory,
+    });
+  }
+  return hits;
+}
+
+export function search(db: Database, queryVec: Float32Array, opts: SearchOptions = {}): SearchHit[] {
+  const limit = opts.limit ?? 10;
+  return hydrate(db, scoreVector(db, queryVec, opts).slice(0, limit));
 }
 
 export function textSearch(db: Database, query: string, opts: SearchOptions = {}): SearchHit[] {
   const limit = opts.limit ?? 10;
   const clauses = ["c.text LIKE ? ESCAPE '\\'"];
   const params: (string | number)[] = [`%${escapeLike(query)}%`];
-  if (opts.after) { clauses.push("c.time_created >= ?"); params.push(opts.after); }
-  if (opts.before) { clauses.push("c.time_created < ?"); params.push(opts.before); }
+  if (opts.after !== undefined) { clauses.push("c.time_created >= ?"); params.push(opts.after); }
+  if (opts.before !== undefined) { clauses.push("c.time_created < ?"); params.push(opts.before); }
   const rows = db
     .prepare<Omit<SearchHit, "score">, (string | number)[]>(
       `SELECT c.session_id, c.seq, c.time_created, c.text, s.title, s.directory
