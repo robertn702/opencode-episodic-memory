@@ -7,7 +7,7 @@
   "author": "robertn702",
   "repository": {
     "type": "git",
-    "url": "https://github.com/robertn702/opencode-episodic-memory"
+    "url": "git+https://github.com/robertn702/opencode-episodic-memory.git"
   },
   "keywords": [
     "opencode",
@@ -27,7 +27,7 @@
     "skills"
   ],
   "bin": {
-    "opencode-episodic": "./src/cli.ts"
+    "opencode-episodic": "src/cli.ts"
   },
   "scripts": {
     "spike": "bun run spikes/spike.ts",
