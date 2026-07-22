@@ -17,9 +17,13 @@ Semver while 0.x: breaking changes bump minor, fixes bump patch.
 
 ## After publishing
 
-- Dogfood: swap the local-path plugin entry in
-  `~/.config/opencode/opencode.json` for the bare package name, restart
-  OpenCode, run an `episodic_search`.
+- Dogfood: update the plugin entry in `~/.config/opencode/opencode.json` to
+  the just-published version — `"opencode-episodic-memory@X.Y.Z"` — then
+  restart OpenCode and run an `episodic_search`. The version MUST be pinned:
+  OpenCode's npm plugin cache short-circuits on any existing install and
+  never re-resolves a bare name / `@latest` (upstream bug
+  anomalyco/opencode#25293; even `--force` doesn't help), so an unpinned
+  entry silently runs the first version ever installed.
 - If the embedding model or a transformers.js major changed, state
   index-validity in the release notes (cosine-verified compatible, or
   "rebuild required").

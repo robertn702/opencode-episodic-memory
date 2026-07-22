@@ -88,4 +88,10 @@ Semantic search over past OpenCode conversations via native plugin tools.
 - Reindex manually with `bun run src/cli.ts sync` (idempotent; watermark-based).
 - Releases follow `docs/RELEASE.md`; the artifact gate is
   `bash spikes/pack-smoke.sh` (pack → clean install → import → embed).
+  OpenCode does NOT auto-update npm plugins: its cache
+  (`~/.cache/opencode/packages/<spec>/`) short-circuits on any existing
+  install, so a bare package name resolves `@latest` once and stays pinned
+  forever (upstream bug anomalyco/opencode#25293). Dogfood configs must pin
+  `"opencode-episodic-memory@X.Y.Z"` and bump the pin every release —
+  restart alone never picks up a new publish.
 - Config is env-var only (`EPISODIC_*`), no config file yet (YAGNI).

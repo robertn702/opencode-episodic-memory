@@ -35,6 +35,17 @@ bun install   # first embed downloads the model (~100 MB, cached afterwards)
 }
 ```
 
+Or from npm — pin the version. OpenCode caches npm plugins and never
+re-resolves a bare name / `@latest`
+([anomalyco/opencode#25293](https://github.com/anomalyco/opencode/issues/25293)),
+so to update later you bump the pin:
+
+```jsonc
+{
+  "plugin": ["opencode-episodic-memory@0.1.1"]
+}
+```
+
 Copy the skill so the agent knows when to search:
 
 ```bash
