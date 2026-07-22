@@ -17,8 +17,10 @@ Semantic search over past OpenCode conversations via native plugin tools.
 - `skills/remembering-conversations/SKILL.md` — recall-behavior skill
 - `docs/embedding-model-eval.md` — model survey + empirical eval behind the
   snowflake choice
-- `eval/` — reusable model-comparison harness (`queries.ts`/`corpus.json`/
-  `results-*` are gitignored: private data); see its README
+- `eval/` — reusable model-comparison harness; private inputs/outputs
+  (`queries.ts`, `corpus.json`, `results-*`) live in `eval/private/`, which is
+  gitignored wholesale — drop any new private artifact there, no gitignore
+  edit needed; see its README
 - Tests: `bun test` (parser + store smoke tests); `bun run typecheck`
 - `spikes/` — Phase 0 verification + plugin harness (run with `bun run`)
 
