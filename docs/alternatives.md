@@ -18,13 +18,18 @@ different problems. It helps to split them into three layers:
    open-mem, opencode-mem's timeline.
 3. **Episodic recall** — semantic search over the *actual past conversations*,
    verbatim, with the full transcript one hop away. This plugin; the design
-   is ported from obra/episodic-memory, which is Claude Code/Codex-only and
-   can't read OpenCode's session store.
+   is ported from obra/episodic-memory, which is Claude Code/Codex-only (it
+   syncs JSONL file trees and can't read OpenCode's SQLite session store; it
+   also indexes with sqlite-vec, which can't load in OpenCode's Bun plugin
+   runtime).
 
-Layers 1 and 2 require an LLM in the indexing path: every session (or every
-turn) is summarized by a model, which costs quota/latency and loses whatever
-the summarizer judged unimportant. Layer 3 indexes what was actually said, so
-recall is only limited by embedding quality — and costs zero LLM calls.
+Most layer-1/2 plugins put an LLM in the indexing path: every session (or
+every turn) is summarized by a model, which costs quota/latency and loses
+whatever the summarizer judged unimportant. (Exceptions exist — true-mem and
+opencode-lcm extract/summarize deterministically — but they pay for it with
+regex-pattern extraction quality or keyword-only search.) Layer 3 indexes
+what was actually said, so recall is only limited by embedding quality — and
+costs zero LLM calls.
 
 This plugin is deliberately layer 3 only. It complements layer-1/2 plugins
 rather than competing with them (see "Running side by side" below).
@@ -42,14 +47,18 @@ session/turn).
 | [zilliztech/memsearch](https://github.com/zilliztech/memsearch) | Activity | Milvus Lite, hybrid BM25 + dense (bge-m3 ONNX) | Yes (summarizes every turn to daily .md) | Yes (cold-start injection) | Python (`uv`/`pip`), shells out to bash/python3; multi-agent |
 | [supermemoryai/opencode-supermemory](https://github.com/supermemoryai/opencode-supermemory) | Curated | **Cloud SaaS** (Supermemory API) | Yes (their service) | Yes | Memories leave your machine; API key |
 | [kuitos/opencode-claude-memory](https://github.com/kuitos/opencode-claude-memory) | Curated | Markdown files in Claude Code's format/paths | Yes (post-session extraction + "auto-dream" consolidation) | Yes (system prompt) | Shell-hook wrapper around `opencode`, python3 |
-| [joshuadavidthomas/opencode-agent-memory](https://github.com/joshuadavidthomas/opencode-agent-memory) | Curated | Markdown memory blocks (Letta-inspired), agent self-edits | Via agent tools | Yes | None notable |
-| [rizal72/true-mem](https://github.com/rizal72/true-mem) | Curated | Cognitive-psychology model (decay, consolidation) | Yes | Yes | — |
-| [psinetron/echoes-vault-opencode](https://github.com/psinetron/echoes-vault-opencode) | Curated | Obsidian-style markdown knowledge base | Yes | Yes | — |
-| [Plutarch01/opencode-lcm](https://github.com/Plutarch01/opencode-lcm) | Activity | SQLite FTS (keyword, not semantic) | Yes | Yes | — |
+| [joshuadavidthomas/opencode-agent-memory](https://github.com/joshuadavidthomas/opencode-agent-memory) | Curated | Markdown memory blocks (Letta-inspired), agent self-edits; opt-in journal with local MiniLM semantic search (agent-written entries, not transcripts) | Via agent tools | Yes | None notable |
+| [rizal72/true-mem](https://github.com/rizal72/true-mem) | Curated | Cognitive-psychology model (decay, consolidation) | No (deterministic regex/pattern extraction) | Yes | — |
+| [psinetron/echoes-vault-opencode](https://github.com/psinetron/echoes-vault-opencode) | Curated | Obsidian-style markdown knowledge base | Yes | No (slash-command workflow: `/echoes-start`) | — |
+| [Plutarch01/opencode-lcm](https://github.com/Plutarch01/opencode-lcm) | Activity (verbatim archive) | SQLite FTS5 + TF-IDF (keyword, not semantic) | No (deterministic summary nodes) | Yes | — |
 
 (Smaller/newer entries not surveyed in depth: clopca/open-mem,
 chriswritescode-dev/opencode-memory, lucasliet/opencode-mem,
-cnicolov/opencode-plugin-simple-memory.)
+cnicolov/opencode-plugin-simple-memory — spot-checked: all embed
+LLM-compressed observations or agent-written memories, none embed verbatim
+transcripts. Nearest non-plugin relative: `opencode-semantic-memory` on PyPI
+embeds session content as-is by default, but it's a Python MCP server with
+three background daemons, not an OpenCode plugin.)
 
 ¹ **Naming collision:** kunickiaj's project was *itself* originally published
 as `opencode-mem` (Python, `uv`-installed) and later renamed to codemem — it
@@ -119,7 +128,8 @@ episodic recall — they use separate storage and don't conflict.
 Every plugin above runs with full tool/filesystem access inside your
 sessions. Two of them (supermemory, and opencode-mem if you point it at a
 cloud embedding/LLM endpoint) send conversation-derived data off-machine by
-design. This plugin never sends conversation content anywhere: read-only
+design (supermemory's `baseUrl` can target a self-hosted instance, but the
+hosted API is the default). This plugin never sends conversation content anywhere: read-only
 access to OpenCode's DB, local embeddings, local index. The
 `DO NOT INDEX THIS CHAT` marker excludes sensitive sessions from the index
 entirely.
