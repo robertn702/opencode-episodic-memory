@@ -45,8 +45,10 @@ conversations via native plugin tools.
 - OpenCode sessions live in one SQLite DB (WAL mode; concurrent read-only access
   is safe), NOT JSONL transcripts like Claude Code.
 - Plugin runs inside OpenCode's Bun runtime — no native deps, no postinstall
-  assumptions. `@huggingface/transformers` + `onnxruntime-node` works but its
-  postinstall must be trusted: `bun pm trust onnxruntime-node protobufjs`.
+  assumptions. `onnxruntime-node` ships all platform binaries in its npm
+  tarball, so the blocked postinstall under `bun install` is harmless for npm
+  consumers. `trustedDependencies` in package.json only affects repo
+  contributors.
 - The `DO NOT INDEX THIS CHAT` exclusion marker is matched as a bare substring
   anywhere in any message part (broader than upstream's full instruction-tag
   match), so it also fires on conversations that merely quote the phrase —
@@ -63,5 +65,8 @@ conversations via native plugin tools.
 
 - Verify empirically before building (see `spikes/`); run
   `bun run spikes/plugin-harness.ts` after changing the plugin.
+- When bumping `@huggingface/transformers`, capture baseline embeddings
+  pre-bump and compare cosine post-bump before assuming existing indexes stay
+  valid (v3↔v4 happened to be identical; don't assume that holds).
 - Reindex manually with `bun run src/cli.ts sync` (idempotent; watermark-based).
 - Config is env-var only (`EPISODIC_*`), no config file yet (YAGNI).

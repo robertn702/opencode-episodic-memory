@@ -35,12 +35,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.5.2"
+    "@huggingface/transformers": "^4.2.0",
+    "@opencode-ai/plugin": "^1.18.4"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "latest",
     "@types/bun": "latest",
-    "typescript": "^5.7.0"
+    "typescript": "^7.0.2"
   },
   "trustedDependencies": [
     "onnxruntime-node",
