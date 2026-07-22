@@ -21,7 +21,6 @@ conversations via native plugin tools.
   `results-*` are gitignored: private data); see its README
 - Tests: `bun test` (parser + store smoke tests); `bun run typecheck`
 - `spikes/` — Phase 0 verification + plugin harness (run with `bun run`)
-- `.opencode/skills/create-plugin/` — vendored from different-ai/openwork
 
 ## Hard-won facts (don't rediscover)
 
@@ -50,10 +49,10 @@ conversations via native plugin tools.
 - The `DO NOT INDEX THIS CHAT` exclusion marker also matches conversations that
   quote it — including conversations about building this tool (mirrors upstream).
 - Plugin API: use `tool()` helper from `@opencode-ai/plugin` (official docs).
-  The vendored create-plugin skill shows an older default-export/zod-shape style;
-  the official style is what's implemented here.
-- different-ai/openwork's `opencode-primitives` skill no longer exists upstream
-  (removed; skills.sh serves a stale snapshot). `create-plugin` is the live one.
+  different-ai/openwork's skills (`opencode-primitives`, `create-plugin`) show
+  an older default-export/zod-shape style and one was removed upstream while
+  skills.sh served a stale snapshot — don't vendor them; the official style is
+  what's implemented here.
 
 ## Conventions
 
