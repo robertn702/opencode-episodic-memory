@@ -60,7 +60,7 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
         args: {
           query: tool.schema.string().describe("Natural-language description of what you're looking for"),
           text: tool.schema.string().optional().describe("Exact substring to require in results (ANDed with semantic ranking)"),
-          mode: tool.schema.enum(["vector", "text"]).optional().describe("'vector' (default) semantic search; 'text' exact substring only"),
+          mode: tool.schema.enum(["vector", "text", "hybrid"]).optional().describe("'vector' (default) semantic search; 'text' lexical BM25; 'hybrid' fuses both via RRF (may surface lexical noise)"),
           after: tool.schema.string().optional().describe("Only conversations after YYYY-MM-DD"),
           before: tool.schema.string().optional().describe("Only conversations before YYYY-MM-DD"),
           limit: tool.schema.number().optional().describe("Max results, 1-50 (default 10)"),
@@ -80,7 +80,9 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
           const hits =
             args.mode === "text"
               ? textSearch(index, args.query, opts)
-              : search(index, (await embedQuery(args.query))[0], opts);
+              : args.mode === "hybrid"
+                ? search(index, (await embedQuery(args.query))[0], { ...opts, queryText: args.query, hybrid: true })
+                : search(index, (await embedQuery(args.query))[0], opts);
           if (hits.length === 0) {
             if (isIndexEmpty(index)) return "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations.";
             return "No matching past conversations found.";

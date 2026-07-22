@@ -1,4 +1,5 @@
 import { describe, test, expect, afterAll } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,24 +51,24 @@ describe("store", () => {
     expect(textSearch(db, "no such phrase")).toHaveLength(0);
   });
 
-  test("LIKE wildcards in user input are escaped (treated literally)", () => {
+  test("search() text filter escapes LIKE wildcards (treated literally)", () => {
+    // textSearch is now FTS/token-based; the LIKE substring escaping lives on
+    // in search()'s `text` filter (and the FTS LIKE fallback), so assert it here.
     replaceSessionChunks(db, meta, [
       { seq: 0, time_created: 1000, text: "progress at 50% done", embedding: new Float32Array([1, 0]) },
       { seq: 1, time_created: 1001, text: "snake_case name here", embedding: new Float32Array([0, 1]) },
       { seq: 2, time_created: 1002, text: "path \\tmp", embedding: new Float32Array([1, 0]) },
     ]);
-    // % must match literally, not as a wildcard
-    expect(textSearch(db, "50%").map((h) => h.text)).toEqual(["progress at 50% done"]);
-    // _ must match literally, not as a single-char wildcard
-    expect(textSearch(db, "snake_case").map((h) => h.text)).toEqual(["snake_case name here"]);
-    // a bare % should NOT match everything (would if unescaped)
-    expect(textSearch(db, "%")).toHaveLength(1);
-    expect(textSearch(db, "_")).toHaveLength(1);
-    // a literal backslash must match only the row containing one — escapeLike
-    // escapes the escape char itself, so this would break if that were missed
-    expect(textSearch(db, "\\").map((h) => h.text)).toEqual(["path \\tmp"]);
-    // search() text filter should also escape
-    expect(search(db, new Float32Array([1, 0]), { text: "50%" })).toHaveLength(1);
+    const vec = new Float32Array([1, 0]);
+    // % and _ match literally, not as LIKE wildcards.
+    expect(search(db, vec, { text: "50%" }).map((h) => h.text)).toEqual(["progress at 50% done"]);
+    expect(search(db, vec, { text: "snake_case" }).map((h) => h.text)).toEqual(["snake_case name here"]);
+    // a bare % / _ must NOT match everything (would if unescaped).
+    expect(search(db, vec, { text: "%" })).toHaveLength(1);
+    expect(search(db, vec, { text: "_" })).toHaveLength(1);
+    // escapeLike escapes the escape char itself: a literal backslash matches
+    // only the row containing one.
+    expect(search(db, vec, { text: "\\" }).map((h) => h.text)).toEqual(["path \\tmp"]);
   });
 
   test("two-phase search hydrates full display fields only for the top-K winners", () => {
@@ -99,5 +100,67 @@ describe("store", () => {
       .toEqual(["at epoch zero", "later chunk"]);
     // textSearch shares the same fix.
     expect(textSearch(db, "chunk", { before: 0 })).toHaveLength(0);
+  });
+
+  test("openIndex backfills the FTS index from pre-existing chunks (migration)", () => {
+    // Simulate a pre-FTS index DB: sessions + chunks populated, no chunks_fts,
+    // user_version 0. openIndex must create the FTS table/triggers and rebuild.
+    const p = join(dir, "legacy.db");
+    const legacy = new Database(p);
+    legacy.run(`CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL,
+      directory TEXT NOT NULL, time_created INTEGER NOT NULL, source_time_updated INTEGER NOT NULL,
+      indexed_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'indexed')`);
+    legacy.run(`CREATE TABLE chunks (
+      session_id TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+      text TEXT NOT NULL, embedding BLOB NOT NULL, PRIMARY KEY (session_id, seq))`);
+    legacy.run("INSERT INTO sessions (id, project_id, parent_id, title, directory, time_created, source_time_updated, indexed_at, status) VALUES ('ses_leg','p',NULL,'Legacy','/tmp',1,1,1,'indexed')");
+    legacy.run("INSERT INTO chunks (session_id, seq, time_created, text, embedding) VALUES ('ses_leg',0,1,'legacy migrated searchable content',?)", [new Float32Array([1, 0])]);
+    legacy.close();
+
+    const migrated = openIndex(p);
+    try {
+      expect(textSearch(migrated, "legacy").map((h) => h.text)).toEqual(["legacy migrated searchable content"]);
+    } finally {
+      migrated.close();
+    }
+  });
+
+  test("textSearch ranks by BM25 (higher term frequency ranks first)", () => {
+    replaceSessionChunks(db, meta, [
+      { seq: 0, time_created: 1000, text: "database migration notes", embedding: new Float32Array([1, 0]) },
+      { seq: 1, time_created: 1001, text: "database database database heavy", embedding: new Float32Array([0, 1]) },
+    ]);
+    const hits = textSearch(db, "database");
+    expect(hits.map((h) => h.seq)).toEqual([1, 0]);
+    expect(hits[0].score).toBeGreaterThan(0); // -bm25 exposed as positive relevance
+  });
+
+  test("hybrid search is opt-in and fuses vector + BM25 (minScore before fusion)", () => {
+    replaceSessionChunks(db, meta, [
+      { seq: 0, time_created: 1000, text: "quantum entanglement notes", embedding: new Float32Array([1, 0]) },
+      { seq: 1, time_created: 1001, text: "kubernetes deployment guide", embedding: new Float32Array([0, 1]) },
+    ]);
+    const vec = new Float32Array([1, 0]);
+    // minScore excludes the orthogonal chunk from the vector arm → only seq0.
+    expect(search(db, vec, { minScore: 0.5 }).map((h) => h.seq)).toEqual([0]);
+    // queryText alone does NOT enable fusion — hybrid is opt-in.
+    expect(search(db, vec, { minScore: 0.5, queryText: "kubernetes deployment" }).map((h) => h.seq)).toEqual([0]);
+    // hybrid: true fuses in the BM25 arm, which surfaces seq1 (matched by text)
+    // even though minScore dropped it from the vector arm → union of both.
+    const hybrid = search(db, vec, { minScore: 0.5, hybrid: true, queryText: "kubernetes deployment" });
+    expect(hybrid.map((h) => h.seq).sort()).toEqual([0, 1]);
+  });
+
+  test("FTS query operators are neutralized (no injection)", () => {
+    replaceSessionChunks(db, meta, [
+      { seq: 0, time_created: 1000, text: "alpha only", embedding: new Float32Array([1, 0]) },
+      { seq: 1, time_created: 1001, text: "beta only", embedding: new Float32Array([0, 1]) },
+    ]);
+    // If "OR" were the boolean operator this would match both rows; quoted, the
+    // three tokens are AND-ed literals → no single row has all → 0 matches.
+    expect(textSearch(db, "alpha OR beta")).toHaveLength(0);
+    // Malformed quoting must never throw (scoreFts falls back to LIKE).
+    expect(() => textSearch(db, 'dangling " quote')).not.toThrow();
   });
 });

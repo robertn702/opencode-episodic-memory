@@ -17,14 +17,18 @@ of the OpenCode memory-plugin landscape? See
 1. **Read** — sessions/messages/parts from OpenCode's `~/.local/share/opencode/opencode.db` (read-only)
 2. **Parse** — condensed exchanges (user text, assistant text, tool names; no reasoning blobs or tool output)
 3. **Embed** — local, offline embeddings via Transformers.js (`Snowflake/snowflake-arctic-embed-m-v1.5` q8, 768 dims; retrieval prefix on search queries). Chosen by empirical eval on a real corpus — see [docs/embedding-model-eval.md](docs/embedding-model-eval.md)
-4. **Index** — plain SQLite at `~/.local/share/opencode-episodic-memory/index.db`; brute-force cosine over Float32 blobs
+4. **Index** — plain SQLite at `~/.local/share/opencode-episodic-memory/index.db`; brute-force cosine over Float32 blobs, plus a built-in FTS5 BM25 index for lexical/hybrid search
 5. **Recall** — native plugin tools `episodic_search` / `episodic_read`, plus a `remembering-conversations` skill that teaches the agent when to search
 6. **Stay fresh** — the plugin re-indexes each session on the `session.idle` event
 
 Design note: `bun:sqlite` cannot load dynamic extensions, so sqlite-vec is not
 usable inside OpenCode plugins. Brute-force cosine is single-digit milliseconds
 at this scale (thousands of chunks) and has zero native-dependency risk. The
-store layer is the single swap point if a real ANN index is ever needed.
+store layer is the single swap point if a real ANN index is ever needed. FTS5 is
+compiled into `bun:sqlite` (not a loadable extension), so lexical BM25 ranking
+is available; search is vector-only by default, with lexical and hybrid
+(reciprocal-rank-fusion) modes opt-in — hybrid is off by default because BM25
+tends to match injected boilerplate on this corpus.
 
 ## Install
 
@@ -69,8 +73,9 @@ Invoke it through the package spec — pin it to match your plugin version:
 
 ```bash
 bunx opencode-episodic-memory@0.1.2 sync [--force]          # index new/changed sessions
-bunx opencode-episodic-memory@0.1.2 search "query"          # semantic search
-bunx opencode-episodic-memory@0.1.2 search q --text "exact" # require substring
+bunx opencode-episodic-memory@0.1.2 search "query"          # semantic (vector) search
+bunx opencode-episodic-memory@0.1.2 search q --text "phrase" # lexical BM25 search
+bunx opencode-episodic-memory@0.1.2 search q --hybrid       # fuse vector + BM25 (RRF; opt-in)
 bunx opencode-episodic-memory@0.1.2 search q --after 2026-07-01 --limit 5
 bunx opencode-episodic-memory@0.1.2 read <session-id>       # full transcript (live store)
 bunx opencode-episodic-memory@0.1.2 read <id> --indexed     # indexed excerpts (survives deletion)
@@ -83,7 +88,7 @@ of day D; `--before D` is exclusive of day D (i.e. up to the start of that day).
 
 ## Agent tools
 
-- **`episodic_search`** — `query` (+ optional `text`, `mode: vector|text`, `after`, `before`, `limit`). Returns dated excerpts with session IDs and similarity scores.
+- **`episodic_search`** — `query` (+ optional `text`, `mode: vector|text|hybrid`, `after`, `before`, `limit`). `vector` (default) is semantic; `text` is lexical BM25; `hybrid` fuses both via RRF (opt-in — can surface lexical noise). Returns dated excerpts with session IDs and scores.
 - **`episodic_read`** — `session_id` (+ optional `indexed`). Full transcript from the live store, falling back to indexed excerpts.
 
 ## Excluding conversations
