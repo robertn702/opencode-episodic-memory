@@ -65,7 +65,12 @@ console.log("=== Spike 2: transcript reconstruction from opencode.db ===");
 
   let exchanges = 0;
   for (const m of messages.slice(0, 6)) {
-    const md: unknown = JSON.parse(m.data);
+    let md: unknown;
+    try {
+      md = JSON.parse(m.data);
+    } catch {
+      md = undefined; // corrupt blob degrades to unknown role
+    }
     const role =
       md && typeof md === "object" && "role" in md && typeof md.role === "string" ? md.role : "unknown";
     const ps = partsByMsg.get(m.id) ?? [];

@@ -58,13 +58,23 @@ export function getSession(db: Database, sessionId: string): SourceSession | nul
 }
 
 // JSON.parse returns `any`; these guards validate shape at runtime so no type
-// assertion is needed. Malformed rows degrade gracefully (unknown type/role).
+// assertion is needed. Malformed rows degrade gracefully (unknown type/role) —
+// including a corrupt `data` blob whose JSON.parse throws, so one bad row can't
+// abort the whole transcript read.
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
+function safeParse(data: string): unknown {
+  try {
+    return JSON.parse(data);
+  } catch {
+    return undefined;
+  }
+}
+
 function parsePart(data: string): SourcePart {
-  const raw: unknown = JSON.parse(data);
+  const raw = safeParse(data);
   if (!isRecord(raw)) return { type: "unknown" };
   return {
     type: typeof raw.type === "string" ? raw.type : "unknown",
@@ -74,7 +84,7 @@ function parsePart(data: string): SourcePart {
 }
 
 function parseRole(data: string): string {
-  const raw: unknown = JSON.parse(data);
+  const raw = safeParse(data);
   return isRecord(raw) && typeof raw.role === "string" ? raw.role : "unknown";
 }
 

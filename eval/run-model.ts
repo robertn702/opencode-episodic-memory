@@ -12,9 +12,27 @@ if (!cfg) { console.error("unknown model", key); process.exit(1); }
 interface CorpusChunk {
   session_id: string; seq: number; time_created: number; title: string; directory: string; text: string;
 }
+// Validate every element, not just the outer array — a malformed chunk would
+// otherwise flow in untyped and blow up later in embedding/scoring.
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+function isCorpusChunk(v: unknown): v is CorpusChunk {
+  return (
+    isRecord(v) &&
+    typeof v.session_id === "string" &&
+    typeof v.seq === "number" &&
+    typeof v.time_created === "number" &&
+    typeof v.title === "string" &&
+    typeof v.directory === "string" &&
+    typeof v.text === "string"
+  );
+}
 const here = new URL(".", import.meta.url).pathname;
 const parsedCorpus: unknown = JSON.parse(await Bun.file(here + "corpus.json").text());
 if (!Array.isArray(parsedCorpus)) throw new Error("corpus.json is not a JSON array");
+const badIndex = parsedCorpus.findIndex((c) => !isCorpusChunk(c));
+if (badIndex !== -1) throw new Error(`corpus.json[${badIndex}] is not a valid CorpusChunk`);
 const corpus: CorpusChunk[] = parsedCorpus;
 
 // ---- embedder setup ----
