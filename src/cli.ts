@@ -45,10 +45,13 @@ function positional(): string[] {
   }
   return out;
 }
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Require strict YYYY-MM-DD, then round-trip to reject impossible calendar dates
+// (`new Date("2024-02-31")` silently normalizes to March 2 rather than failing).
 const dateMs = (s: string | null): number | undefined => {
   if (!s) return undefined;
   const ms = new Date(s).getTime();
-  if (Number.isNaN(ms)) {
+  if (!DATE_RE.test(s) || Number.isNaN(ms) || new Date(ms).toISOString().slice(0, 10) !== s) {
     console.error(`error: invalid date "${s}" (expected YYYY-MM-DD)`);
     process.exit(1);
   }

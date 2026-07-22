@@ -11,10 +11,15 @@ import { hasExcludeMarker } from "../src/parser";
 // Discriminated result so callers handle the parse error explicitly (no cast to
 // strip the error arm off a union). `ms` is undefined when no date was given.
 type ParsedDate = { ok: true; ms?: number } | { ok: false; error: string };
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Require strict YYYY-MM-DD, then round-trip to reject impossible calendar dates
+// (`new Date("2024-02-31")` silently normalizes to March 2 rather than failing).
 const parseDateArg = (s?: string): ParsedDate => {
   if (!s) return { ok: true };
   const ms = new Date(s).getTime();
-  if (Number.isNaN(ms)) return { ok: false, error: `Invalid date "${s}" (expected YYYY-MM-DD).` };
+  if (!DATE_RE.test(s) || Number.isNaN(ms) || new Date(ms).toISOString().slice(0, 10) !== s) {
+    return { ok: false, error: `Invalid date "${s}" (expected YYYY-MM-DD).` };
+  }
   return { ok: true, ms };
 };
 const fmtDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);

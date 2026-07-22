@@ -12,10 +12,14 @@ import type { PluginInput, ToolContext } from "@opencode-ai/plugin";
 
 // The plugin only reads client.app.log; the rest of PluginInput is a large
 // generated SDK surface we don't reconstruct here. Structurally typed (not any).
+// Captured log messages let the harness observe the fire-and-forget reindex.
+const logMessages: string[] = [];
 const mockClient = {
   app: {
-    log: async (input: { body: { level: string; message: string } }) =>
-      console.log(`[log:${input.body.level}]`, input.body.message),
+    log: async (input: { body: { level: string; message: string } }) => {
+      logMessages.push(input.body.message);
+      console.log(`[log:${input.body.level}]`, input.body.message);
+    },
   },
 };
 
@@ -46,13 +50,28 @@ const ctx: ToolContext = {
 const { openSource, listSessions } = await import("../src/reader");
 const source = openSource();
 const sessions = listSessions(source);
+if (sessions.length === 0) {
+  throw new Error(
+    "harness error: source opencode.db has zero sessions — cannot exercise the reindex hook. Populate opencode.db or point EPISODIC_SOURCE_DB at a DB with sessions."
+  );
+}
 const target = sessions[sessions.length - 1];
 await hooks.event({
   event: { type: "session.idle", properties: { sessionID: target.id } },
 });
-// give the fire-and-forget reindex a tick to start
-await new Promise((r) => setTimeout(r, 500));
-console.log("event hook OK (reindex fired for", target.id + ")");
+// The reindex is fire-and-forget; poll the captured plugin logs (bounded) for
+// its completion marker rather than assuming success after a fixed delay.
+const REINDEX_TIMEOUT_MS = 30_000;
+const deadline = Date.now() + REINDEX_TIMEOUT_MS;
+let reindexMsg: string | undefined;
+while (Date.now() < deadline) {
+  reindexMsg = logMessages.find((m) => m.startsWith("reindexed ") || m.startsWith("reindex failed"));
+  if (reindexMsg) break;
+  await new Promise((r) => setTimeout(r, 100));
+}
+if (!reindexMsg) throw new Error(`harness error: reindex did not complete within ${REINDEX_TIMEOUT_MS}ms`);
+if (reindexMsg.startsWith("reindex failed")) throw new Error(`harness error: ${reindexMsg}`);
+console.log(`event hook OK (${reindexMsg})`);
 
 // 2. episodic_search
 const result = await hooks.tool.episodic_search.execute(
