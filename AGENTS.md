@@ -1,7 +1,7 @@
 # opencode-episodic-memory — agent context
 
-Port of obra/episodic-memory to OpenCode. Semantic search over past OpenCode
-conversations via native plugin tools.
+Inspired by obra/episodic-memory.
+Semantic search over past OpenCode conversations via native plugin tools.
 
 ## Layout
 
