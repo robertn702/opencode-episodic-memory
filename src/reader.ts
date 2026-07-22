@@ -128,7 +128,10 @@ export function transcriptHasMarker(db: Database, sessionId: string): boolean {
   return row.n > 0;
 }
 
-export function getTranscript(db: Database, sessionId: string): SourceMessage[] {
+// Module-internal: the raw read with no privacy gate. Production code must go
+// through getTranscriptChecked so the exclusion marker can never be bypassed by
+// forgetting a manual transcriptHasMarker() call. Not exported.
+function getTranscript(db: Database, sessionId: string): SourceMessage[] {
   const messages = MessageRowSchema.array().parse(
     db
       .prepare(
@@ -161,4 +164,19 @@ export function getTranscript(db: Database, sessionId: string): SourceMessage[] 
     timeCreated: m.time_created,
     parts: partsByMsg.get(m.id) ?? [],
   }));
+}
+
+// Discriminated result: excluded conversations never yield a transcript.
+export type CheckedTranscript =
+  | { excluded: true }
+  | { excluded: false; messages: SourceMessage[] };
+
+// The single privacy-gated entry point for reading a transcript. Runs the
+// AUTHORITATIVE raw-blob exclusion check (transcriptHasMarker) BEFORE reading,
+// so the opt-out marker cannot be bypassed by a caller forgetting to check.
+// All production call sites (CLI read, plugin episodic_read, indexer) use this;
+// the raw getTranscript is module-internal.
+export function getTranscriptChecked(db: Database, sessionId: string): CheckedTranscript {
+  if (transcriptHasMarker(db, sessionId)) return { excluded: true };
+  return { excluded: false, messages: getTranscript(db, sessionId) };
 }

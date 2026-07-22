@@ -1,7 +1,7 @@
 // Build the eval corpus ONCE from the live opencode.db, using the exact same
 // chunking pipeline as src/indexer.ts, so every candidate model is scored on
 // identical chunks. Output: eval/private/corpus.json (gitignored — private).
-import { openSource, listSessions, getTranscript } from "../src/reader";
+import { openSource, listSessions, getTranscriptChecked } from "../src/reader";
 import { parseTranscript, exchangeText } from "../src/parser";
 
 interface CorpusChunk {
@@ -18,7 +18,9 @@ const sessions = listSessions(source);
 const chunks: CorpusChunk[] = [];
 let excluded = 0, empty = 0;
 for (const s of sessions) {
-  const { exchanges, excluded: ex } = parseTranscript(getTranscript(source, s.id));
+  const checked = getTranscriptChecked(source, s.id);
+  if (checked.excluded) { excluded++; continue; }
+  const { exchanges, excluded: ex } = parseTranscript(checked.messages);
   if (ex) { excluded++; continue; }
   if (exchanges.length === 0) { empty++; continue; }
   const date = new Date(s.time_created).toISOString().slice(0, 10);

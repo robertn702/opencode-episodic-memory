@@ -55,8 +55,9 @@ Semantic search over past OpenCode conversations via native plugin tools.
   **JSON `data` blobs** (message role, part contents) **degrade per-row** to
   `"unknown"`/`undefined` via `.catch()`, so one corrupt or unfamiliar blob can't
   abort a whole transcript read (the parser already filters unknown types/roles).
-  Because `getTranscript` throws on structural drift and `syncAll` calls it
-  per-session, a structural drift aborts the whole bulk sync (all-or-nothing) —
+  Because the internal `getTranscript` throws on structural drift and `syncAll`
+  reads every session through `getTranscriptChecked` (which calls it), a
+  structural drift aborts the whole bulk sync (all-or-nothing) —
   intentional fail-loud; the plugin's `session.idle` reindex catches and logs it.
   The index DB (`store.ts`) deliberately stays on `db.prepare<T>()` typed casts —
   we own that schema end to end, so runtime validation adds no value there. Keep
@@ -75,10 +76,17 @@ Semantic search over past OpenCode conversations via native plugin tools.
   `transcriptHasMarker()` in reader.ts, which substring-matches the RAW `data`
   column (`instr`, exact case) with no JSON parsing — the marker must not
   depend on blob parseability, since the blob pipeline degrades unparseable
-  parts to `text: undefined`. It gates indexing (indexer.ts), `episodic_read`,
-  and CLI `read`. `hasExcludeMarker()` in parser.ts is a cheaper parsed-text
-  fast path kept for parseTranscript's in-memory flow; EXCLUDE_MARKER lives in
-  reader.ts and is re-exported by parser.ts.
+  parts to `text: undefined`. All production reads go through
+  **`getTranscriptChecked()`** (reader.ts), which runs that raw check BEFORE
+  materializing anything and returns a discriminated
+  `{ excluded: true } | { excluded: false; messages }` union — so indexing
+  (indexer.ts), `episodic_read`, and CLI `read` cannot bypass the gate by
+  forgetting a manual check. The raw `getTranscript` is module-internal (not
+  exported); `transcriptHasMarker` stays exported as the authoritative
+  primitive (directly tested in reader.test.ts). `hasExcludeMarker()` in
+  parser.ts is a cheaper parsed-text fast path kept for parseTranscript's
+  in-memory flow; EXCLUDE_MARKER lives in reader.ts and is re-exported by
+  parser.ts.
 - Plugin API: use `tool()` helper from `@opencode-ai/plugin` (official docs).
   different-ai/openwork's skills (`opencode-primitives`, `create-plugin`) show
   an older default-export/zod-shape style and one was removed upstream while

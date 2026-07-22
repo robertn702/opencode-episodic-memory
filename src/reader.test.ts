@@ -1,6 +1,15 @@
 import { describe, test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { listSessions, getSession, getTranscript, transcriptHasMarker, EXCLUDE_MARKER } from "./reader";
+import { listSessions, getSession, getTranscriptChecked, transcriptHasMarker, EXCLUDE_MARKER, type SourceMessage } from "./reader";
+
+// getTranscript is module-internal now; exercise its blob-degradation behavior
+// through the privacy-gated accessor. These fixtures carry no exclusion marker,
+// so the `excluded` arm never fires here.
+function readMessages(db: Database, id: string): SourceMessage[] {
+  const r = getTranscriptChecked(db, id);
+  if (r.excluded) throw new Error(`unexpected exclusion for ${id}`);
+  return r.messages;
+}
 
 // A minimal opencode.db mirroring only the columns reader.ts SELECTs. Writable
 // here so we can seed rows; the reader functions take a Database and never write.
@@ -79,7 +88,7 @@ describe("listSessions / getSession (structural rows)", () => {
   });
 });
 
-describe("getTranscript (JSON blob degradation)", () => {
+describe("getTranscriptChecked (JSON blob degradation)", () => {
   test("parses roles and part fields; degrades malformed blobs per-row", () => {
     const db = makeSource();
     addSession(db, { id: "ses_a" });
@@ -94,7 +103,7 @@ describe("getTranscript (JSON blob degradation)", () => {
     addPart(db, "p4", "m2", "ses_a", 4, `{"type":123,"text":"keep"}`); // type->unknown, text kept
     addPart(db, "p5", "m4", "ses_a", 5, `42`);                       // non-object -> {type:"unknown"}
 
-    const t = getTranscript(db, "ses_a");
+    const t = readMessages(db, "ses_a");
     expect(t.map((m) => m.role)).toEqual(["user", "assistant", "unknown", "unknown"]);
 
     expect(t[0].parts).toEqual([
@@ -115,7 +124,7 @@ describe("getTranscript (JSON blob degradation)", () => {
     addPart(db, "p1", "m1", "ses_a", 1, `{"type":"text","text":123}`); // bad text dropped
     addPart(db, "p2", "m1", "ses_a", 2, `{"type":"tool","tool":123}`); // bad tool dropped
 
-    const t = getTranscript(db, "ses_a");
+    const t = readMessages(db, "ses_a");
     expect(t[0].parts).toEqual([{ type: "text" }, { type: "tool" }]);
   });
 
@@ -126,7 +135,7 @@ describe("getTranscript (JSON blob degradation)", () => {
     // from the part row below.
     addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
     db.run("INSERT INTO part (id, message_id, session_id, time_created, data) VALUES ('p1', 'm1', 'ses_a', 1, NULL)");
-    expect(() => getTranscript(db, "ses_a")).toThrow();
+    expect(() => getTranscriptChecked(db, "ses_a")).toThrow();
   });
 
   test("throws when a message row's data column is non-string (structural drift)", () => {
@@ -134,7 +143,7 @@ describe("getTranscript (JSON blob degradation)", () => {
     addSession(db, { id: "ses_a" });
     // data NULL violates the row schema's z.string(); structural, so it throws.
     db.run("INSERT INTO message (id, session_id, time_created, data) VALUES ('m1', 'ses_a', 1, NULL)");
-    expect(() => getTranscript(db, "ses_a")).toThrow();
+    expect(() => getTranscriptChecked(db, "ses_a")).toThrow();
   });
 });
 
@@ -156,11 +165,9 @@ describe("transcriptHasMarker (raw blob scan)", () => {
     addSession(db, { id: "ses_a" });
     addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
     addPart(db, "p1", "m1", "ses_a", 1, `{oops not json ${EXCLUDE_MARKER}`);
-
-    // Sanity: the parsed view really does lose the marker text.
-    const t = getTranscript(db, "ses_a");
-    expect(t[0].parts).toEqual([{ type: "unknown" }]);
-
+    // The parsed view would degrade this blob to {type:"unknown"}, losing the
+    // marker text (see the degradation suite above) — only the raw scan catches
+    // it. That is the whole point of transcriptHasMarker.
     expect(transcriptHasMarker(db, "ses_a")).toBe(true);
   });
 
@@ -168,11 +175,10 @@ describe("transcriptHasMarker (raw blob scan)", () => {
     const db = makeSource();
     addSession(db, { id: "ses_a" });
     addMessage(db, "m1", "ses_a", 1, `{"role":"user"}`);
-    // Valid JSON, but type is non-string → degrades to {type:"unknown"}.
+    // Valid JSON, but type is non-string → the parsed view degrades to
+    // {type:"unknown"} and the marker survives only in an unmodeled field; the
+    // raw scan still catches it.
     addPart(db, "p1", "m1", "ses_a", 1, `{"type":123,"note":"${EXCLUDE_MARKER}"}`);
-
-    const t = getTranscript(db, "ses_a");
-    expect(t[0].parts).toEqual([{ type: "unknown" }]);
     expect(transcriptHasMarker(db, "ses_a")).toBe(true);
   });
 
