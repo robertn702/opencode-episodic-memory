@@ -74,7 +74,7 @@ Invoke it through the package spec — pin it to match your plugin version:
 ```bash
 bunx opencode-episodic-memory@0.1.2 sync [--force]          # index new/changed sessions
 bunx opencode-episodic-memory@0.1.2 search "query"          # semantic (vector) search
-bunx opencode-episodic-memory@0.1.2 search q --text "phrase" # lexical BM25 search
+bunx opencode-episodic-memory@0.1.2 search q --text "terms"  # lexical BM25 (all terms AND-matched, token-based)
 bunx opencode-episodic-memory@0.1.2 search q --hybrid       # fuse vector + BM25 (RRF; opt-in)
 bunx opencode-episodic-memory@0.1.2 search q --after 2026-07-01 --limit 5
 bunx opencode-episodic-memory@0.1.2 read <session-id>       # full transcript (live store)

@@ -55,7 +55,12 @@ Semantic search over past OpenCode conversations via native plugin tools.
   to any write path, not just replaceSessionChunks) and backfilled once for
   pre-FTS index DBs via a `PRAGMA user_version`-gated `'rebuild'` (COUNT(\*) on
   an external-content FTS returns the content count, so it can't detect an
-  un-backfilled index — user_version is the reliable signal).
+  un-backfilled index — user_version is the reliable signal). **Never VACUUM
+  index.db**: the FTS5 external-content mapping rides `chunks`' IMPLICIT rowid
+  (the PK is `(session_id, seq)`, no explicit `INTEGER PRIMARY KEY` alias), and
+  VACUUM may renumber implicit rowids — silently misaligning every FTS posting
+  from its chunk row. If VACUUM is ever needed, first migrate `chunks` to an
+  explicit `rowid INTEGER PRIMARY KEY`.
 - **Hybrid (vector+BM25 RRF) search is opt-in, NOT the default.** search()
   defaults to pure vector; pass `hybrid: true` + `queryText` (CLI `--hybrid`,
   plugin `mode: "hybrid"`) to fuse. Empirically on this corpus BM25 matches
@@ -63,9 +68,15 @@ Semantic search over past OpenCode conversations via native plugin tools.
   drags those noise hits above genuine semantic matches — e.g. "episodic memory
   architecture decisions" surfaced "TealHQ Cloudflare deployment" / "3-month
   financial projection" at the top. minScore is applied to the vector arm BEFORE
-  fusion (its calibration is cosine, not BM25). `textSearch`/`mode:"text"` is
-  pure BM25 (quoted-term MATCH to neutralize FTS operators; LIKE fallback only
-  on an FTS syntax error).
+  fusion (its calibration is cosine, not BM25). Hybrid hits carry fused **RRF
+  scores (~0.03)**, a DIFFERENT scale from the vector arm's cosine (~0.4–0.7) —
+  don't judge them against the documented cosine thresholds; CLI/plugin output
+  labels them `rrf:` (not `score:`) for this reason. `textSearch`/`mode:"text"`
+  is pure BM25 (quoted-term MATCH to neutralize FTS operators; the LIKE fallback
+  fires ONLY on an FTS5 syntax error — any other SqliteError rethrows so a
+  corrupt index can't silently degrade to unranked results). An empty/
+  whitespace-only text query returns `[]` (the old LIKE scan returned recent
+  chunks).
 - OpenCode sessions live in one SQLite DB (WAL mode; concurrent read-only access
   is safe), NOT JSONL transcripts like Claude Code.
 - Runtime validation of `opencode.db` reads uses **Zod** (`src/reader.ts`), split

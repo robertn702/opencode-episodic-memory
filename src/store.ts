@@ -56,6 +56,13 @@ export function openIndex(path: string = indexDbPath()): Database {
   // the text isn't duplicated; the FTS index is kept in sync by triggers on
   // chunks — robust to any write path (not just replaceSessionChunks), which is
   // the standard SQLite pattern for external-content FTS5.
+  //
+  // WARNING — never VACUUM this DB. content_rowid rides chunks' IMPLICIT rowid
+  // (the PK is (session_id, seq), so there is no explicit INTEGER PRIMARY KEY
+  // alias for rowid). VACUUM may renumber implicit rowids, which would silently
+  // misalign every FTS posting from its chunk row. If VACUUM ever becomes
+  // necessary, give chunks an explicit `rowid INTEGER PRIMARY KEY` first (a
+  // migration) — do not just run it. See AGENTS.md.
   db.run("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, content='chunks', content_rowid='rowid')");
   db.run(`CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
     INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
@@ -262,8 +269,15 @@ function scoreFts(db: Database, query: string, opts: SearchOptions, depth: numbe
       )
       .all(match, ...params, depth);
     return rows.map((r) => ({ session_id: r.session_id, seq: r.seq, time_created: r.time_created, score: -r.rank }));
-  } catch {
-    return scoreLike(db, query, opts, depth);
+  } catch (e) {
+    // Degrade to the unranked LIKE scan ONLY for a malformed MATCH expression.
+    // ftsQueryString fully quotes every token, so this is defensive/near-dead —
+    // but a different SqliteError (e.g. a corrupt/missing FTS index) must NOT be
+    // masked as "no ranking"; rethrow it so the real failure surfaces.
+    if (e instanceof Error && e.message.includes("fts5: syntax error")) {
+      return scoreLike(db, query, opts, depth);
+    }
+    throw e;
   }
 }
 
@@ -320,6 +334,10 @@ export function search(db: Database, queryVec: Float32Array, opts: SearchOptions
   return hydrate(db, fused.slice(0, limit));
 }
 
+// Lexical BM25 search. NOTE the behavior change from the pre-FTS LIKE
+// implementation: an empty or whitespace-only query now returns [] (the FTS
+// MATCH expression is empty → matches nothing), whereas the old LIKE '%%' scan
+// returned the most recent chunks. Callers wanting "recent" must query for it.
 export function textSearch(db: Database, query: string, opts: SearchOptions = {}): SearchHit[] {
   const limit = opts.limit ?? 10;
   return hydrate(db, scoreFts(db, query, opts, limit));

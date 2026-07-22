@@ -27,7 +27,8 @@ conversation — the index is for cross-session recall, not code search.
    not exact keywords ("migrating from Claude Code to OpenCode", not "claude opencode").
    - Narrow with `after`/`before` dates or an exact `text` substring when you know one
      (an error string, a flag name, a file path).
-   - `mode: "text"` for exact-phrase lookup only.
+   - `mode: "text"` for lexical BM25 search: every query word must appear (token-based
+     AND, BM25-ranked) — not phrase/adjacency or substring matching.
 2. Skim the returned excerpts (date, session title, score). Similarity scores are
    NOT calibrated probabilities: ≥ ~0.55 is a strong match, 0.4–0.55 is likely
    relevant, < ~0.35 is weak or merely adjacent — judge by the snippet, not the
