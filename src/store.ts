@@ -92,6 +92,12 @@ export interface SearchHit {
   directory: string;
 }
 
+// Escape LIKE wildcards so user input can't broaden a substring filter.
+// Backslash escapes itself; used with the `ESCAPE '\'` clause below.
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => "\\" + c);
+}
+
 export interface SearchOptions {
   limit?: number;
   after?: number; // ms epoch
@@ -106,7 +112,7 @@ export function search(db: Database, queryVec: Float32Array, opts: SearchOptions
   const params: (string | number)[] = [];
   if (opts.after) { clauses.push("c.time_created >= ?"); params.push(opts.after); }
   if (opts.before) { clauses.push("c.time_created <= ?"); params.push(opts.before); }
-  if (opts.text) { clauses.push("c.text LIKE ?"); params.push(`%${opts.text}%`); }
+  if (opts.text) { clauses.push("c.text LIKE ? ESCAPE '\\'"); params.push(`%${escapeLike(opts.text)}%`); }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
   const rows = db
@@ -145,9 +151,9 @@ export function textSearch(db: Database, query: string, opts: SearchOptions = {}
     .prepare(
       `SELECT c.session_id, c.seq, c.time_created, c.text, s.title, s.directory
        FROM chunks c JOIN sessions s ON s.id = c.session_id
-       WHERE c.text LIKE ? ORDER BY c.time_created DESC LIMIT ?`
+       WHERE c.text LIKE ? ESCAPE '\\' ORDER BY c.time_created DESC LIMIT ?`
     )
-    .all(`%${query}%`, limit) as Omit<SearchHit, "score">[];
+    .all(`%${escapeLike(query)}%`, limit) as Omit<SearchHit, "score">[];
   return rows.map((r) => ({ ...r, score: 1 }));
 }
 

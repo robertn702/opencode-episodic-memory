@@ -49,4 +49,20 @@ describe("store", () => {
     expect(textSearch(db, "only chunk")).toHaveLength(1);
     expect(textSearch(db, "no such phrase")).toHaveLength(0);
   });
+
+  test("LIKE wildcards in user input are escaped (treated literally)", () => {
+    replaceSessionChunks(db, meta, [
+      { seq: 0, time_created: 1000, text: "progress at 50% done", embedding: new Float32Array([1, 0]) },
+      { seq: 1, time_created: 1001, text: "snake_case name here", embedding: new Float32Array([0, 1]) },
+    ]);
+    // % must match literally, not as a wildcard
+    expect(textSearch(db, "50%").map((h) => h.text)).toEqual(["progress at 50% done"]);
+    // _ must match literally, not as a single-char wildcard
+    expect(textSearch(db, "snake_case").map((h) => h.text)).toEqual(["snake_case name here"]);
+    // a bare % should NOT match everything (would if unescaped)
+    expect(textSearch(db, "%")).toHaveLength(1);
+    expect(textSearch(db, "_")).toHaveLength(1);
+    // search() text filter should also escape
+    expect(search(db, new Float32Array([1, 0]), { text: "50%" })).toHaveLength(1);
+  });
 });

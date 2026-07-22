@@ -59,6 +59,9 @@ bun run src/cli.ts stats                   # index statistics
 bun run src/cli.ts doctor                  # diagnose setup
 ```
 
+`--after`/`--before` take `YYYY-MM-DD` (midnight UTC). `--after D` is inclusive
+of day D; `--before D` is exclusive of day D (i.e. up to the start of that day).
+
 ## Agent tools
 
 - **`episodic_search`** — `query` (+ optional `text`, `mode: vector|text`, `after`, `before`, `limit`). Returns dated excerpts with session IDs and similarity scores.
@@ -72,8 +75,10 @@ Any conversation containing this marker is archived nowhere and indexed nowhere:
 DO NOT INDEX THIS CHAT
 ```
 
-Note this also excludes conversations that merely *quote* the marker (such as
-discussions about this tool itself) — same semantics as upstream.
+Note: the marker is matched as a bare substring anywhere in any message part, so
+this also excludes conversations that merely *quote* the phrase (such as
+discussions about this tool itself). This is broader than upstream's full
+instruction-tag match — the intent is the same, but our matching is literal.
 
 ## Configuration (env vars)
 

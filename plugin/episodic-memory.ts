@@ -4,10 +4,16 @@
 import { type Plugin, tool } from "@opencode-ai/plugin";
 import { openSource, getSession, getTranscript } from "../src/reader";
 import { openIndex, search, textSearch } from "../src/store";
-import { syncSession, syncAll } from "../src/indexer";
+import { syncSession, syncAll, pruneOrphans } from "../src/indexer";
 import { embedQuery } from "../src/embed";
+import { hasExcludeMarker } from "../src/parser";
 
-const dateMs = (s?: string) => (s ? new Date(s).getTime() : undefined);
+const dateMs = (s?: string): number | { error: string } | undefined => {
+  if (!s) return undefined;
+  const ms = new Date(s).getTime();
+  if (Number.isNaN(ms)) return { error: `Invalid date "${s}" (expected YYYY-MM-DD).` };
+  return ms;
+};
 const fmtDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
 export const EpisodicMemory: Plugin = async ({ client }) => {
@@ -28,8 +34,13 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
         if (sessionId) {
           const s = getSession(source, sessionId);
           if (s) await syncSession(source, index, s);
+          // Cheap (two small SELECTs + rare DELETEs), so prune on every idle:
+          // the syncAll path below effectively never fires (session.idle always
+          // carries a sessionID), and without this, deleted conversations would
+          // linger in the index — searchable and readable — for plugin-only users.
+          pruneOrphans(source, index);
         } else {
-          await syncAll(source, index);
+          await syncAll(source, index); // syncAll prunes source-deleted orphans
         }
         await log("info", `reindexed ${key}`);
       } catch (e) {
@@ -64,17 +75,25 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
         },
         async execute(args) {
           const index = openIndex();
+          const after = dateMs(args.after);
+          if (after && typeof after === "object") return after.error;
+          const before = dateMs(args.before);
+          if (before && typeof before === "object") return before.error;
           const opts = {
             limit: Math.min(Math.max(args.limit ?? 10, 1), 50),
-            after: dateMs(args.after),
-            before: dateMs(args.before),
+            after: after as number | undefined,
+            before: before as number | undefined,
             text: args.text,
           };
           const hits =
             args.mode === "text"
               ? textSearch(index, args.query, opts)
               : search(index, (await embedQuery(args.query))[0], opts);
-          if (hits.length === 0) return "No matching past conversations found.";
+          if (hits.length === 0) {
+            const chunkCount = (index.prepare("SELECT COUNT(*) n FROM chunks").get() as { n: number }).n;
+            if (chunkCount === 0) return "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations.";
+            return "No matching past conversations found.";
+          }
           return hits
             .map((h) => {
               const snippet = h.text.replace(/\s+/g, " ").slice(0, 400);
@@ -97,8 +116,12 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
               const source = openSource();
               const s = getSession(source, args.session_id);
               if (s) {
+                const transcript = getTranscript(source, args.session_id);
+                if (hasExcludeMarker(transcript)) {
+                  return "Session is marked private (exclusion marker present); transcript withheld.";
+                }
                 const lines: string[] = [`# ${s.title}`, `${fmtDate(s.time_created)} — ${s.directory} — ${s.id}`, ""];
-                for (const m of getTranscript(source, args.session_id)) {
+                for (const m of transcript) {
                   const text = m.parts
                     .filter((p) => p.type === "text" && p.text)
                     .map((p) => p.text)

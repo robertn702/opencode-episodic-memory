@@ -8,7 +8,7 @@ conversations via native plugin tools.
 - `src/reader.ts` — read-only access to `~/.local/share/opencode/opencode.db`
   (session/message/part tables, JSON blobs in `data`; schema verified 2026-07-22)
 - `src/parser.ts` — transcript → condensed exchanges; exclusion marker handling
-- `src/embed.ts` — Transformers.js singleton, mean-pooled normalized embeddings
+- `src/embed.ts` — Transformers.js singleton, CLS-pooled normalized embeddings
 - `src/store.ts` — index SQLite DB, brute-force cosine search (**the** swap point
   if an ANN index is ever needed)
 - `src/indexer.ts` — incremental sync, watermark = `session.time_updated`
@@ -34,7 +34,8 @@ conversations via native plugin tools.
   401 now — use official repos' own ONNX exports.
 - Truncate embedded text at 2000 chars (upstream measured quality peaks there);
   the stored chunk text may be longer for display, embed.ts truncates.
-- Sync prunes index sessions that no longer exist in the source DB (deleted
+- Sync (CLI `sync` and the plugin's per-session `session.idle` reindex alike)
+  prunes index sessions that no longer exist in the source DB (deleted
   conversations would otherwise linger with stale-model embeddings), and search
   skips embedding rows whose byteLength ≠ dims×4 — a mixed-model index can never
   crash or corrupt search. Both bugs were found during the bge→snowflake
@@ -46,8 +47,12 @@ conversations via native plugin tools.
 - Plugin runs inside OpenCode's Bun runtime — no native deps, no postinstall
   assumptions. `@huggingface/transformers` + `onnxruntime-node` works but its
   postinstall must be trusted: `bun pm trust onnxruntime-node protobufjs`.
-- The `DO NOT INDEX THIS CHAT` exclusion marker also matches conversations that
-  quote it — including conversations about building this tool (mirrors upstream).
+- The `DO NOT INDEX THIS CHAT` exclusion marker is matched as a bare substring
+  anywhere in any message part (broader than upstream's full instruction-tag
+  match), so it also fires on conversations that merely quote the phrase —
+  including conversations about building this tool. `hasExcludeMarker()` in
+  parser.ts also gates `episodic_read`/`read` (live transcript path), so a
+  markered chat is never returned verbatim.
 - Plugin API: use `tool()` helper from `@opencode-ai/plugin` (official docs).
   different-ai/openwork's skills (`opencode-primitives`, `create-plugin`) show
   an older default-export/zod-shape style and one was removed upstream while

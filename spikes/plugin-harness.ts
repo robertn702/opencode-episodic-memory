@@ -1,5 +1,12 @@
 // Simulates the OpenCode plugin runtime: mock ctx, call the factory,
 // exercise the event hook and both tools.
+// Uses a throwaway index DB in /tmp so the live index is never touched.
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+process.env.EPISODIC_INDEX_DB = join(mkdtempSync(join(tmpdir(), "episodic-harness-")), "index.db");
+
 import EpisodicMemory from "../plugin/episodic-memory";
 
 const mockClient = {
