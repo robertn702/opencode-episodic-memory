@@ -2,11 +2,10 @@
 // - Native tools: episodic_search, episodic_read
 // - Incremental reindex on session.idle (fire-and-forget, debounced)
 import { type Plugin, tool } from "@opencode-ai/plugin";
-import { openSource, getSession, getTranscript } from "../src/reader";
+import { openSource, getSession, getTranscript, transcriptHasMarker } from "../src/reader";
 import { openIndex, search, textSearch } from "../src/store";
 import { syncSession, syncAll, pruneOrphans } from "../src/indexer";
 import { embedQuery } from "../src/embed";
-import { hasExcludeMarker } from "../src/parser";
 
 // Discriminated result so callers handle the parse error explicitly (no cast to
 // strip the error arm off a union). `ms` is undefined when no date was given.
@@ -124,10 +123,12 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
               const source = openSource();
               const s = getSession(source, args.session_id);
               if (s) {
-                const transcript = getTranscript(source, args.session_id);
-                if (hasExcludeMarker(transcript)) {
+                // Authoritative gate: raw part blobs (a marker in an
+                // unparseable blob would be invisible to the parsed-text scan).
+                if (transcriptHasMarker(source, args.session_id)) {
                   return "Session is marked private (exclusion marker present); transcript withheld.";
                 }
+                const transcript = getTranscript(source, args.session_id);
                 const lines: string[] = [`# ${s.title}`, `${fmtDate(s.time_created)} — ${s.directory} — ${s.id}`, ""];
                 for (const m of transcript) {
                   const text = m.parts

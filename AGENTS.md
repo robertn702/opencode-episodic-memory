@@ -69,9 +69,14 @@ Semantic search over past OpenCode conversations via native plugin tools.
 - The `DO NOT INDEX THIS CHAT` exclusion marker is matched as a bare substring
   anywhere in any message part (broader than upstream's full instruction-tag
   match), so it also fires on conversations that merely quote the phrase —
-  including conversations about building this tool. `hasExcludeMarker()` in
-  parser.ts also gates `episodic_read`/`read` (live transcript path), so a
-  marked chat is never returned verbatim.
+  including conversations about building this tool. The AUTHORITATIVE check is
+  `transcriptHasMarker()` in reader.ts, which substring-matches the RAW `data`
+  column (`instr`, exact case) with no JSON parsing — the marker must not
+  depend on blob parseability, since the blob pipeline degrades unparseable
+  parts to `text: undefined`. It gates indexing (indexer.ts), `episodic_read`,
+  and CLI `read`. `hasExcludeMarker()` in parser.ts is a cheaper parsed-text
+  fast path kept for parseTranscript's in-memory flow; EXCLUDE_MARKER lives in
+  reader.ts and is re-exported by parser.ts.
 - Plugin API: use `tool()` helper from `@opencode-ai/plugin` (official docs).
   different-ai/openwork's skills (`opencode-primitives`, `create-plugin`) show
   an older default-export/zod-shape style and one was removed upstream while

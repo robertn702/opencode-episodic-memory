@@ -10,11 +10,10 @@
 //   stats                          Index statistics
 //   doctor                         Diagnose setup
 import { existsSync } from "node:fs";
-import { openSource, sourceDbPath, getSession, getTranscript } from "./reader";
+import { openSource, sourceDbPath, getSession, getTranscript, transcriptHasMarker } from "./reader";
 import { openIndex, indexDbPath, search, textSearch, stats, type SearchHit } from "./store";
 import { syncAll } from "./indexer";
 import { embed, embedQuery } from "./embed";
-import { hasExcludeMarker } from "./parser";
 
 const [, , command, ...rest] = process.argv;
 
@@ -126,11 +125,13 @@ async function main() {
       const source = openSource();
       const s = getSession(source, id);
       if (!s) { console.error("session not found:", id); process.exit(1); }
-      const transcript = getTranscript(source, id);
-      if (hasExcludeMarker(transcript)) {
+      // Authoritative gate: raw part blobs (a marker in an unparseable blob
+      // would be invisible to the parsed-text scan).
+      if (transcriptHasMarker(source, id)) {
         console.error("session is marked private (exclusion marker present); transcript withheld");
         process.exit(1);
       }
+      const transcript = getTranscript(source, id);
       console.log(`# ${s.title}\n${fmtDate(s.time_created)} — ${s.directory} — ${s.id}\n`);
       for (const m of transcript) {
         const text = m.parts.filter((p) => p.type === "text" && p.text).map((p) => p.text).join("\n");

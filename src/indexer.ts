@@ -1,7 +1,7 @@
 // Incremental, idempotent indexer. Watermark = session.time_updated; a session
 // is re-embedded only when the source changed since we last indexed it.
 import type { Database } from "bun:sqlite";
-import { getTranscript, listSessions, type SourceSession } from "./reader";
+import { getTranscript, listSessions, transcriptHasMarker, type SourceSession } from "./reader";
 import { parseTranscript, exchangeText } from "./parser";
 import { embed } from "./embed";
 import { getIndexedSession, replaceSessionChunks } from "./store";
@@ -24,7 +24,12 @@ export async function syncSession(
   const prior = getIndexedSession(index, s.id);
   if (!force && prior && prior.source_time_updated >= s.time_updated) return "fresh";
 
-  const { exchanges, excluded } = parseTranscript(getTranscript(source, s.id));
+  // Authoritative opt-out gate: raw part blobs. The parsed-text scan inside
+  // parseTranscript would miss a marker in an unparseable blob.
+  const excludedRaw = transcriptHasMarker(source, s.id);
+  const { exchanges, excluded } = excludedRaw
+    ? { exchanges: [], excluded: true }
+    : parseTranscript(getTranscript(source, s.id));
   const meta = {
     id: s.id, project_id: s.project_id, parent_id: s.parent_id,
     title: s.title, directory: s.directory,
