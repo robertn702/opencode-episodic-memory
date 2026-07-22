@@ -69,4 +69,35 @@ describe("store", () => {
     // search() text filter should also escape
     expect(search(db, new Float32Array([1, 0]), { text: "50%" })).toHaveLength(1);
   });
+
+  test("two-phase search hydrates full display fields only for the top-K winners", () => {
+    replaceSessionChunks(db, meta, [
+      { seq: 0, time_created: 1000, text: "alpha chunk", embedding: new Float32Array([1, 0]) },
+      { seq: 1, time_created: 1001, text: "beta chunk", embedding: new Float32Array([0, 1]) },
+    ]);
+    // limit 1 → only the top winner is hydrated (phase 2), but it carries the
+    // full text/title/directory — identical to the old single-query path.
+    const hits = search(db, new Float32Array([1, 0]), { limit: 1 });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({
+      session_id: "ses_test", seq: 0, text: "alpha chunk",
+      title: "Test session", directory: "/tmp",
+    });
+    expect(hits[0].score).toBeCloseTo(1);
+  });
+
+  test("after/before use !== undefined so an epoch-0 bound is honored, not dropped", () => {
+    replaceSessionChunks(db, meta, [
+      { seq: 0, time_created: 0, text: "at epoch zero", embedding: new Float32Array([1, 0]) },
+      { seq: 1, time_created: 5000, text: "later chunk", embedding: new Float32Array([1, 0]) },
+    ]);
+    // before: 0 must filter to nothing. Under the old falsy check the 0 bound
+    // was skipped and every row leaked through.
+    expect(search(db, new Float32Array([1, 0]), { before: 0 })).toHaveLength(0);
+    // after: 0 is an inclusive lower bound (both rows are >= 0).
+    expect(search(db, new Float32Array([1, 0]), { after: 0 }).map((h) => h.text).sort())
+      .toEqual(["at epoch zero", "later chunk"]);
+    // textSearch shares the same fix.
+    expect(textSearch(db, "chunk", { before: 0 })).toHaveLength(0);
+  });
 });
