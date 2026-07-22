@@ -1,9 +1,9 @@
 // Embed the eval corpus + run the known-answer test set for one model.
 // Usage: bun run eval/run-model.ts <modelKey>   (keys: see eval/models.ts)
-// Writes eval/results-<modelKey>.json (gitignored).
+// Writes eval/private/results-<modelKey>.json (gitignored).
 import { pipeline, AutoModel, AutoTokenizer } from "@huggingface/transformers";
 import { MODELS, MAX_CHARS, type ModelConfig } from "./models";
-import { QUERIES } from "./queries";
+import { QUERIES } from "./private/queries";
 
 const key = process.argv[2];
 const cfg = MODELS.find((m) => m.key === key);
@@ -29,7 +29,7 @@ function isCorpusChunk(v: unknown): v is CorpusChunk {
   );
 }
 const here = new URL(".", import.meta.url).pathname;
-const parsedCorpus: unknown = JSON.parse(await Bun.file(here + "corpus.json").text());
+const parsedCorpus: unknown = JSON.parse(await Bun.file(here + "private/corpus.json").text());
 if (!Array.isArray(parsedCorpus)) throw new Error("corpus.json is not a JSON array");
 const badIndex = parsedCorpus.findIndex((c) => !isCorpusChunk(c));
 if (badIndex !== -1) throw new Error(`corpus.json[${badIndex}] is not a valid CorpusChunk`);
@@ -108,5 +108,5 @@ for (const tq of QUERIES) {
 }
 const queryMs = (performance.now() - t1) / QUERIES.length;
 
-await Bun.write(here + `results-${key}.json`, JSON.stringify({ key, repo: cfg.repo, dims: sanity.length, embedMs, queryMs, results }, null, 2));
+await Bun.write(here + `private/results-${key}.json`, JSON.stringify({ key, repo: cfg.repo, dims: sanity.length, embedMs, queryMs, results }, null, 2));
 console.error(`[${key}] done, ${queryMs.toFixed(1)} ms/query (incl. query embed)`);

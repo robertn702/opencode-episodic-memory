@@ -1,6 +1,6 @@
 // Build the eval corpus ONCE from the live opencode.db, using the exact same
 // chunking pipeline as src/indexer.ts, so every candidate model is scored on
-// identical chunks. Output: eval/corpus.json (gitignored — private content).
+// identical chunks. Output: eval/private/corpus.json (gitignored — private).
 import { openSource, listSessions, getTranscript } from "../src/reader";
 import { parseTranscript, exchangeText } from "../src/parser";
 
@@ -33,5 +33,5 @@ for (const s of sessions) {
     });
   });
 }
-await Bun.write(new URL("./corpus.json", import.meta.url).pathname, JSON.stringify(chunks));
+await Bun.write(new URL("./private/corpus.json", import.meta.url).pathname, JSON.stringify(chunks));
 console.log(`sessions=${sessions.length} excluded=${excluded} empty=${empty} chunks=${chunks.length}`);

@@ -4,8 +4,7 @@ dist/
 .scratch/
 .context/
 
-# eval data is private (your own conversation history); only code is committed
-/eval/queries.ts
-/eval/corpus.json
-/eval/results-*.json
+# eval data is private (your own conversation history); only code is committed.
+# Anything under eval/private/ stays local — fail-safe by default.
+/eval/private/
 
