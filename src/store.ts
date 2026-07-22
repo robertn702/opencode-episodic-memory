@@ -161,6 +161,13 @@ export function textSearch(db: Database, query: string, opts: SearchOptions = {}
   return rows.map((r) => ({ ...r, score: 1 }));
 }
 
+// Cheap "is there anything to search?" check. Shared by the CLI and the plugin
+// so their empty-index messaging stays consistent (a single COUNT, not the full
+// stats() roll-up).
+export function isIndexEmpty(db: Database): boolean {
+  return (db.prepare<{ n: number }, []>("SELECT COUNT(*) n FROM chunks").get()?.n ?? 0) === 0;
+}
+
 export interface IndexStats {
   sessions: number;
   excluded: number;
