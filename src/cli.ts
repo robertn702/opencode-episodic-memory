@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 // opencode-episodic <command> [options]
 //   sync [--force]                 Index new/changed sessions from opencode.db
-//   search <query> [options]       Semantic search over indexed conversations
-//     --text "phrase"              Exact substring match instead of vector
+//   search <query> [options]       Semantic (vector) search over indexed conversations
+//     --text "phrase"              Lexical BM25 search for this phrase instead of vector
+//     --hybrid                     Fuse vector + BM25 (RRF); off by default (see AGENTS.md)
 //     --after YYYY-MM-DD           Only conversations after this date
 //     --before YYYY-MM-DD          Only conversations before this date
 //     --limit N                    Max results (default 10)
@@ -35,6 +36,7 @@ function parseCli() {
         limit: { type: "string" },
         force: { type: "boolean" },
         indexed: { type: "boolean" },
+        hybrid: { type: "boolean" },
       },
       allowPositionals: true,
       strict: true,
@@ -74,17 +76,20 @@ async function main() {
 
     case "search": {
       const query = positionals.join(" ");
-      if (!query) { console.error("usage: opencode-episodic search <query> [--text p] [--after d] [--before d] [--limit n]"); process.exit(1); }
+      if (!query) { console.error("usage: opencode-episodic search <query> [--text p] [--hybrid] [--after d] [--before d] [--limit n]"); process.exit(1); }
       const index = openIndex();
       const opts = {
         limit: Number(values.limit ?? 10),
         after: dateArg(values.after),
         before: dateArg(values.before),
       };
-      const textFlag = values.text;
-      const hits = textFlag
-        ? textSearch(index, textFlag, opts)
-        : search(index, (await embedQuery(query))[0], opts);
+      const hits = values.text
+        ? textSearch(index, values.text, opts)
+        : search(
+            index,
+            (await embedQuery(query))[0],
+            values.hybrid ? { ...opts, queryText: query, hybrid: true } : opts
+          );
       if (hits.length === 0) {
         console.log(isIndexEmpty(index)
           ? "No results. The index is empty — run: bun run src/cli.ts sync"

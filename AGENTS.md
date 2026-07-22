@@ -9,8 +9,10 @@ Semantic search over past OpenCode conversations via native plugin tools.
   (session/message/part tables, JSON blobs in `data`; schema verified 2026-07-22)
 - `src/parser.ts` — transcript → condensed exchanges; exclusion marker handling
 - `src/embed.ts` — Transformers.js singleton, CLS-pooled normalized embeddings
-- `src/store.ts` — index SQLite DB, brute-force cosine search (**the** swap point
-  if an ANN index is ever needed)
+- `src/store.ts` — index SQLite DB; brute-force cosine vector search (**the**
+  swap point if an ANN index is ever needed) + FTS5 BM25 lexical search, fused
+  on demand via reciprocal rank fusion. Two-phase: score candidates on
+  embeddings/BM25 only, hydrate text/title/directory for the top-K winners.
 - `src/indexer.ts` — incremental sync, watermark = `session.time_updated`
 - `src/cli.ts` — `bun run src/cli.ts sync|search|read|stats|doctor`
 - `plugin/episodic-memory.ts` — OpenCode plugin (tools + `session.idle` reindex)
@@ -46,6 +48,24 @@ Semantic search over past OpenCode conversations via native plugin tools.
   migration (12 orphaned 384-dim chunks crashed a 768-dim query).
 - **`bun:sqlite` does not support dynamic extension loading** — sqlite-vec cannot
   work inside OpenCode plugins. Hence brute-force cosine over Float32 blobs.
+  FTS5, by contrast, is **compiled into** bun:sqlite (a static module, not a
+  loadable extension — verified in `spikes/fts5-check.ts`), so lexical BM25
+  search IS available. The FTS index (`chunks_fts`) is an external-content
+  FTS5 table over `chunks.text`, kept in sync by triggers on `chunks` (robust
+  to any write path, not just replaceSessionChunks) and backfilled once for
+  pre-FTS index DBs via a `PRAGMA user_version`-gated `'rebuild'` (COUNT(\*) on
+  an external-content FTS returns the content count, so it can't detect an
+  un-backfilled index — user_version is the reliable signal).
+- **Hybrid (vector+BM25 RRF) search is opt-in, NOT the default.** search()
+  defaults to pure vector; pass `hybrid: true` + `queryText` (CLI `--hybrid`,
+  plugin `mode: "hybrid"`) to fuse. Empirically on this corpus BM25 matches
+  injected boilerplate (the `[MEMORY]` preamble, tool descriptions) and RRF then
+  drags those noise hits above genuine semantic matches — e.g. "episodic memory
+  architecture decisions" surfaced "TealHQ Cloudflare deployment" / "3-month
+  financial projection" at the top. minScore is applied to the vector arm BEFORE
+  fusion (its calibration is cosine, not BM25). `textSearch`/`mode:"text"` is
+  pure BM25 (quoted-term MATCH to neutralize FTS operators; LIKE fallback only
+  on an FTS syntax error).
 - OpenCode sessions live in one SQLite DB (WAL mode; concurrent read-only access
   is safe), NOT JSONL transcripts like Claude Code.
 - Runtime validation of `opencode.db` reads uses **Zod** (`src/reader.ts`), split
