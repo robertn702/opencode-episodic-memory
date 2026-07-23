@@ -45,6 +45,7 @@ session/turn).
 | [tickernelz/opencode-mem](https://github.com/tickernelz/opencode-mem) | Curated + activity | SQLite + USearch (ExactScan fallback) | Yes (auto-capture summarizes sessions via your provider) | Yes (chat.message hook) | Web UI on :4747 |
 | [kunickiaj/codemem](https://github.com/kunickiaj/codemem)¹ | Activity + curated | SQLite FTS5 BM25 + sqlite-vec, merged/reranked | Yes (observer pipeline writes typed memories) | Yes (every prompt, via chat transform) | Node 24+, web viewer, optional P2P sync; also Claude Code/Codex |
 | [zilliztech/memsearch](https://github.com/zilliztech/memsearch) | Activity | Milvus Lite, hybrid BM25 + dense (bge-m3 ONNX) | Yes (summarizes every turn to daily .md) | Yes (cold-start injection) | Python (`uv`/`pip`), shells out to bash/python3; multi-agent |
+| [rohitg00/agentmemory](https://github.com/rohitg00/agentmemory)² (`@agentmemory/agentmemory`) | Curated + activity | iii-engine KV + in-memory vector; BM25 + vector + knowledge graph, RRF fusion; 4-tier consolidation + decay | Yes (LLM-compresses each observation into facts/concepts/narrative) | Yes (SessionStart hook, ~2K-token budget) | **iii-engine runtime binary (pinned v0.11.2) or Docker**; REST :3111 + viewer :3113 + WS; optional cloud embed/LLM providers; also Claude Code/Codex/50+ agents |
 | [supermemoryai/opencode-supermemory](https://github.com/supermemoryai/opencode-supermemory) | Curated | **Cloud SaaS** (Supermemory API) | Yes (their service) | Yes | Memories leave your machine; API key |
 | [kuitos/opencode-claude-memory](https://github.com/kuitos/opencode-claude-memory) | Curated | Markdown files in Claude Code's format/paths | Yes (post-session extraction + "auto-dream" consolidation) | Yes (system prompt) | Shell-hook wrapper around `opencode`, python3 |
 | [joshuadavidthomas/opencode-agent-memory](https://github.com/joshuadavidthomas/opencode-agent-memory) | Curated | Markdown memory blocks (Letta-inspired), agent self-edits; opt-in journal with local MiniLM semantic search (agent-written entries, not transcripts) | Via agent tools | Yes | None notable |
@@ -64,6 +65,17 @@ three background daemons, not an OpenCode plugin.)
 as `opencode-mem` (Python, `uv`-installed) and later renamed to codemem — it
 is unrelated to tickernelz/opencode-mem despite the shared former name. Its
 README's "migrating from opencode-mem" notes refer to its own old identity.
+
+² **Naming collision:** rohitg00/agentmemory (npm `@agentmemory/agentmemory`)
+is unrelated to joshuadavidthomas/opencode-agent-memory despite the near-identical
+names — the former is a cross-agent memory *engine* (runs the `iii-engine`
+runtime plus REST/viewer servers, wires into 50+ agents), the latter a
+dependency-free OpenCode markdown-blocks plugin. agentmemory is the most
+feature-heavy entry here (knowledge graph, multi-agent leases/signals, 53 MCP
+tools, session replay), but it's layer-1/2: the searchable store is
+LLM-compressed observations, not verbatim transcripts, and standing it up means
+running a separate native engine (or Docker) — the opposite end of the
+operational-footprint spectrum from this plugin's single file + one SQLite DB.
 
 ## Why this exists alongside opencode-mem
 
