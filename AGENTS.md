@@ -5,6 +5,8 @@ Semantic search over past OpenCode conversations via native plugin tools.
 
 ## Layout
 
+- `ARCHITECTURE.md` — system overview with Mermaid diagrams (data model,
+  write/read paths, design decisions); keep in sync when changing the pipeline
 - `src/reader.ts` — read-only access to `~/.local/share/opencode/opencode.db`
   (session/message/part tables, JSON blobs in `data`; schema verified 2026-07-22)
 - `src/parser.ts` — transcript → condensed exchanges; exclusion marker handling
