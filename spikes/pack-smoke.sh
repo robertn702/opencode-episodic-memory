@@ -2,7 +2,7 @@
 # Verify the actual publish artifact before `npm publish`: pack the tarball,
 # install it into a clean dir exactly the way OpenCode installs npm plugins
 # (bun install, postinstalls untrusted), then import the plugin entry and run
-# a real embedding. This is the check that caught @opencode-ai/plugin being a
+# a real Node-sidecar embedding. This is the check that caught @opencode-ai/plugin being a
 # devDependency — dependency-placement bugs only surface from a clean install.
 set -euo pipefail
 
@@ -36,15 +36,15 @@ echo "== opencode server-entrypoint resolution =="
 # by OpenCode. Run against the clean-installed artifact, not the repo source.
 bun run spikes/verify-opencode-entrypoint.ts "$WORK/cache/node_modules/opencode-episodic-memory"
 
-echo "== embed smoke (downloads ~110MB model on first run) =="
+echo "== packaged Node sidecar embed smoke (downloads ~110MB model on first run) =="
 (cd "$WORK/cache" && bun -e "
 const { embedQuery } = await import('./node_modules/opencode-episodic-memory/src/embed.ts');
 const [v] = await embedQuery('pack smoke test');
-const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+const norm = Math.sqrt(v.reduce((sum, value) => sum + value * value, 0));
 if (v.length !== 768 || Math.abs(norm - 1) > 1e-3) {
   throw new Error('bad embedding: dims=' + v.length + ' norm=' + norm);
 }
-console.log('embed ok: dims', v.length, 'norm', norm.toFixed(4));
+console.log('sidecar embed ok: dims', v.length, 'norm', norm.toFixed(4));
 ")
 
 echo "PACK SMOKE OK"

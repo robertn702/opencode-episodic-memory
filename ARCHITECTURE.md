@@ -8,12 +8,12 @@ user-facing usage, see [README.md](README.md).
 
 ## System overview
 
-The project is a pure TypeScript/Bun pipeline with two SQLite databases and no
-servers, daemons, or network calls (except the one-time embedding-model
-download). It reads OpenCode's session store, embeds condensed conversation
-exchanges locally, and serves semantic search through two thin front-ends: an
-OpenCode plugin (agent tools + auto-reindex) and a CLI (sync/search/read/stats/
-doctor).
+The project has a Bun host and a lazily started system-Node embedding sidecar,
+two SQLite databases, and no remote service (except the one-time embedding-model
+download). The Bun host reads OpenCode's session store, sends prepared condensed
+exchanges to the Node process for local embedding, and serves search through two
+thin front-ends: an OpenCode plugin (agent tools + auto-reindex) and a CLI
+(`sync/search/read/stats/doctor`).
 
 ```mermaid
 flowchart LR
@@ -21,10 +21,14 @@ flowchart LR
         OCDB[("~/.local/share/opencode/<br/>opencode.db<br/>session / message / part")]
     end
 
-    subgraph Pipeline["Indexing pipeline (src/)"]
+    subgraph BunHost["OpenCode / CLI Bun host"]
         R[reader.ts<br/>validated read-only access<br/>+ privacy gate]
         P[parser.ts<br/>transcript → condensed<br/>exchanges]
-        E[embed.ts<br/>Transformers.js singleton<br/>Snowflake arctic-embed-m<br/>q8 · CLS pool · 768 dims]
+        E[embed.ts<br/>prepare text + NDJSON client<br/>sidecar lifecycle]
+    end
+
+    subgraph NodeSidecar["Persistent system Node 20+ sidecar"]
+        ES[embed-sidecar.mjs<br/>Transformers.js singleton<br/>Snowflake arctic-embed-m<br/>q8 · CLS pool · 768 dims]
     end
 
     subgraph Index["Index (read/write)"]
@@ -41,14 +45,16 @@ flowchart LR
         SK[skills/remembering-conversations<br/>teaches the agent WHEN to search]
     end
 
-    OCDB --> R --> P --> E --> S
+    OCDB --> R --> P --> E
+    E <-->|NDJSON stdin/stdout| ES
+    ES --> S
     S <--> IDB
     PLG --> S
     CLI --> S
     PLG -.->|session.idle| R
     SK -.when-to-recall.-> PLG
 
-    HF[(Hugging Face<br/>model hub)] -.one-time ~100 MB<br/>download, then cached.-> E
+    HF[(Hugging Face<br/>model hub)] -.one-time ~100 MB<br/>download, then cached.-> ES
 ```
 
 `src/format.ts` (not shown) is a shared presentation layer — date parsing,
@@ -60,7 +66,9 @@ transcript rendering, hit formatting — so the CLI and plugin can't drift apart
 |---|---|---|
 | `src/reader.ts` | Read-only access to `opencode.db`. Zod validation; **authoritative privacy gate** | `listSessions`, `getSession`, `getTranscriptChecked`, `transcriptHasMarker`, `EXCLUDE_MARKER` |
 | `src/parser.ts` | Transcript → condensed `Exchange[]` (user text, assistant text, tool names) | `parseTranscript`, `exchangeText`, `hasExcludeMarker` (fast path) |
-| `src/embed.ts` | Local embeddings via Transformers.js; process-wide singleton pipeline | `embed` (docs), `embedQuery` (adds retrieval prefix), `QUERY_PREFIX`, `MAX_CHARS` |
+| `src/embed.ts` | Embedding API + Node-sidecar client. Prepares text, manages one lazy child, and validates protocol vectors without importing Transformers.js | `embed` (docs), `embedQuery` (adds retrieval prefix), `QUERY_PREFIX`, `MAX_CHARS` |
+| `src/embed-sidecar.mjs` | Plain Node ESM NDJSON server; dynamically imports Transformers.js and holds the warm pipeline | protocol `{id,texts}` -> `{id,vectors}` / `{id,error}` |
+| `src/embed-inline.ts` | Explicit lazy inline fallback for exceptional hosts | `embedInline` |
 | `src/store.ts` | Index SQLite schema + all retrieval (vector / BM25 / hybrid RRF) | `openIndex`, `replaceSessionChunks`, `search`, `textSearch`, `stats` |
 | `src/indexer.ts` | Incremental, idempotent sync; watermark-based; orphan pruning | `syncSession`, `syncAll`, `pruneOrphans` |
 | `src/format.ts` | Shared presentation for CLI + plugin | `parseDateArg`, `renderTranscript`, `formatHits` |
@@ -140,7 +148,8 @@ sequenceDiagram
     participant I as indexer.ts
     participant R as reader.ts
     participant P as parser.ts
-    participant E as embed.ts
+    participant E as embed.ts<br/>Bun host
+    participant N as embed-sidecar.mjs<br/>Node 20+
     participant S as store.ts
 
     T->>I: syncAll() / syncSession()
@@ -162,6 +171,8 @@ sequenceDiagram
                 I->>S: replaceSessionChunks([], status="empty")
             else
                 I->>E: embed(exchangeTexts)  [≤2000 chars each]
+                E->>N: NDJSON {id, texts}
+                N-->>E: NDJSON {id, vectors}
                 E-->>I: Float32Array[768] × n
                 I->>S: replaceSessionChunks(chunks, status="indexed")
                 Note over S: transaction — upsert session,<br/>delete old chunks, insert new.<br/>FTS triggers fire automatically
@@ -191,8 +202,9 @@ Key properties:
 
 ```mermaid
 flowchart TB
-    Q[query text] --> EQ["embedQuery<br/>prepend retrieval prefix,<br/>embed 768-dim"]
-    EQ --> V["scoreVector<br/>brute-force cosine over all<br/>candidate embedding blobs<br/>+ time/text filters + minScore"]
+    Q[query text] --> EQ["embedQuery in Bun<br/>prepend retrieval prefix,<br/>truncate at 2000 chars"]
+    EQ --> N["Node sidecar<br/>embed 768-dim"]
+    N --> V["scoreVector<br/>brute-force cosine over all<br/>candidate embedding blobs<br/>+ time/text filters + minScore"]
 
     subgraph Modes["Retrieval modes (store.search / store.textSearch)"]
         V --> D{mode?}
@@ -244,12 +256,14 @@ silently masked).
 | Zod on source reads only | Structural rows throw (fail-loud on OpenCode schema drift); JSON blobs degrade per-row. The index DB uses typed `prepare<T>()` casts — we own that schema end to end. No `as` assertions elsewhere. |
 | Watermark incremental sync + orphan pruning | Cheap re-indexes; deleted conversations don't linger with stale embeddings. |
 | Shared `format.ts` | CLI and plugin stay thin and can't drift apart in output formatting or date handling. |
+| Node sidecar by default | Importing the plugin must not dlopen Transformers.js native addons (`onnxruntime-node`, `sharp`) into OpenCode's embedded Bun. A detached, unref'd Node 20+ process starts only on the first embedding, serializes inference, and exits on stdin EOF when its Bun host goes away. |
+| Inline is explicit and lazy | `EPISODIC_EMBED_MODE=inline` dynamically imports its backend only on an embedding call, but is unsafe on affected OpenCode/Bun versions with native-addon teardown defects. There is never automatic fallback from failed sidecar startup to inline. |
 | Env-var-only config (`EPISODIC_*`) | No config file yet (YAGNI). |
 
 ## Directory guide
 
 ```
-src/       core library (reader, parser, embed, store, indexer, format, cli) + tests
+src/       core library (reader, parser, embed host/client, inline backend, Node sidecar, store, indexer, format, cli) + tests
 plugin/    OpenCode plugin entrypoint (the npm package's main)
 skills/    remembering-conversations skill (agent recall behavior)
 spikes/    Phase-0 verification scripts + plugin harness (run with `bun run`)
@@ -259,11 +273,11 @@ docs/      embedding-model eval, alternatives survey, release process
 
 ## Testing & verification
 
-- `bun test` — parser + store + reader unit tests
+- `bun test` — parser/store/reader tests plus offline fake-sidecar protocol and lifecycle tests
 - `bun run typecheck` — `tsc --noEmit`
 - `bun run spikes/plugin-harness.ts` — plugin smoke harness; run after changing
   the plugin
 - `bash spikes/pack-smoke.sh` — release gate: pack → clean install → import →
-  embed
+  real Node-sidecar embed (including the packaged `.mjs` sidecar)
 - `bun run src/cli.ts doctor` — end-to-end environment diagnosis (source DB
   readable, index writable, embedder working)

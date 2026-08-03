@@ -8,9 +8,9 @@ Semver while 0.x: breaking changes bump minor, fixes bump patch.
 2. Bump `version` in `package.json`.
 3. `bun install && bun run typecheck && bun test && bun run spikes/plugin-harness.ts`
    (`prepublishOnly` also runs typecheck + tests as a backstop).
-4. `bash spikes/pack-smoke.sh` — packs the tarball and verifies it installs
-   and embeds from a clean dir, the way OpenCode installs npm plugins. First
-   run on a machine downloads the ~110MB model.
+4. `bash spikes/pack-smoke.sh` — packs the tarball and verifies it cleanly
+   installs, imports, and executes the packaged Node-sidecar embedding from a
+   clean dir. First run on a machine downloads the ~110MB model.
 5. `npm publish` (first time: `npm login` first).
 6. `git tag vX.Y.Z && git push origin vX.Y.Z`
 7. `gh release create vX.Y.Z --generate-notes`
@@ -27,6 +27,10 @@ Semver while 0.x: breaking changes bump minor, fixes bump patch.
 - If the embedding model or a transformers.js major changed, state
   index-validity in the release notes (cosine-verified compatible, or
   "rebuild required").
+- Keep semantic embedding in the default Node 20+ sidecar. Do not change the
+  default to `EPISODIC_EMBED_MODE=inline`: affected OpenCode/Bun hosts can crash
+  during native-addon shutdown when Transformers.js loads in the embedded Bun
+  process.
 
 ## Optional future hardening
 

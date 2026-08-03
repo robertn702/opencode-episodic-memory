@@ -15,7 +15,7 @@ import { parseArgs } from "node:util";
 import { openSource, sourceDbPath, getSession, getTranscriptChecked } from "./reader";
 import { openIndex, indexDbPath, search, textSearch, stats, isIndexEmpty } from "./store";
 import { syncAll } from "./indexer";
-import { embed, embedQuery } from "./embed";
+import { embed, embedQuery, getEmbedMode } from "./embed";
 import { parseDateArg, fmtDate, renderTranscript, formatHits } from "./format";
 
 const [, , command, ...rest] = process.argv;
@@ -157,6 +157,34 @@ async function main() {
 
     case "doctor": {
       let ok = true;
+      let mode: "sidecar" | "inline";
+      try {
+        mode = getEmbedMode();
+        console.log(`✓ embedding mode: ${mode}`);
+      } catch (e) {
+        console.error(`✗ embedding mode: ${e}`);
+        process.exit(1);
+      }
+      if (mode === "sidecar") {
+        const nodeBinary = process.env.EPISODIC_NODE_BINARY ?? "node";
+        try {
+          const node = Bun.spawnSync([nodeBinary, "--version"], { stdout: "pipe", stderr: "pipe" });
+          const version = new TextDecoder().decode(node.stdout).trim();
+          const match = /^v(\d+)\./.exec(version);
+          if (!node.success || !match || Number(match[1]) < 20) {
+            const detail = new TextDecoder().decode(node.stderr).trim();
+            console.error(`✗ Node 20+ required for sidecar mode (${JSON.stringify(nodeBinary)} ${version || detail || "not found"}). Set EPISODIC_NODE_BINARY to a Node 20+ executable.`);
+            ok = false;
+          } else {
+            console.log(`✓ sidecar Node: ${nodeBinary} ${version}`);
+          }
+        } catch (e) {
+          console.error(`✗ Node 20+ required for sidecar mode (${JSON.stringify(nodeBinary)} could not start: ${e}). Set EPISODIC_NODE_BINARY to a Node 20+ executable.`);
+          ok = false;
+        }
+      } else {
+        console.warn("! inline embedding mode loads native ML addons into Bun; it is unsafe on affected OpenCode/Bun versions. Prefer sidecar mode.");
+      }
       const src = sourceDbPath();
       if (existsSync(src)) console.log(`✓ source DB: ${src}`);
       else { console.error(`✗ source DB missing: ${src}`); ok = false; }
