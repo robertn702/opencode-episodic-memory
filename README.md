@@ -18,7 +18,7 @@ of the OpenCode memory-plugin landscape? See
 
 1. **Read** — sessions/messages/parts from OpenCode's `~/.local/share/opencode/opencode.db` (read-only)
 2. **Parse** — condensed exchanges (user text, assistant text, tool names; no reasoning blobs or tool output)
-3. **Embed** — local, offline embeddings via Transformers.js (`Snowflake/snowflake-arctic-embed-m-v1.5` q8, 768 dims; retrieval prefix on search queries). Chosen by empirical eval on a real corpus — see [docs/embedding-model-eval.md](docs/embedding-model-eval.md)
+3. **Embed** — local, offline embeddings via Transformers.js in a persistent system-Node sidecar (`Snowflake/snowflake-arctic-embed-m-v1.5` q8, 768 dims; retrieval prefix on search queries). Chosen by empirical eval on a real corpus — see [docs/embedding-model-eval.md](docs/embedding-model-eval.md)
 4. **Index** — plain SQLite at `~/.local/share/opencode-episodic-memory/index.db`; brute-force cosine over Float32 blobs, plus a built-in FTS5 BM25 index for lexical/hybrid search
 5. **Recall** — native plugin tools `episodic_search` / `episodic_read`, plus a `remembering-conversations` skill that teaches the agent when to search
 6. **Stay fresh** — the plugin re-indexes each session on the `session.idle` event
@@ -52,7 +52,11 @@ Or edit `~/.config/opencode/opencode.json` manually:
 }
 ```
 
-The first embedding run downloads the model (~100 MB, cached afterwards).
+Semantic indexing and vector/hybrid search require a system **Node 20+** binary
+(`node` by default). The first embedding run downloads the model (~100 MB,
+cached afterwards). The model and its native runtime live in that Node sidecar,
+not inside OpenCode's Bun/TUI process. `episodic_read` and lexical text search
+remain available without Node.
 
 Install the skill so the agent knows when to search, via the
 [`skills` CLI](https://github.com/vercel-labs/skills):
@@ -123,6 +127,15 @@ instruction-tag match — the intent is the same, but our matching is literal.
 | `EPISODIC_SOURCE_DB` | `~/.local/share/opencode/opencode.db` | OpenCode session store |
 | `EPISODIC_INDEX_DB` | `~/.local/share/opencode-episodic-memory/index.db` | Index location |
 | `EPISODIC_EMBED_MODEL` | `Snowflake/snowflake-arctic-embed-m-v1.5` | Transformers.js embedding model |
+| `EPISODIC_EMBED_MODE` | `sidecar` | `sidecar` runs embeddings in Node; `inline` is an explicit escape hatch |
+| `EPISODIC_NODE_BINARY` | `node` | Node 20+ executable used by sidecar mode |
+
+`EPISODIC_EMBED_MODE=inline` loads Transformers.js native addons directly in
+OpenCode's embedded Bun process. It exists only as an explicit compatibility
+escape hatch and is unsafe with affected OpenCode/Bun releases that can crash
+during native-addon teardown. It is never selected automatically if sidecar
+startup fails. Run `bun run src/cli.ts doctor` to diagnose the selected mode,
+Node version, and a real embedding.
 
 ## Not yet implemented (deliberate)
 

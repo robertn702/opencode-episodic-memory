@@ -10,7 +10,9 @@ Semantic search over past OpenCode conversations via native plugin tools.
 - `src/reader.ts` — read-only access to `~/.local/share/opencode/opencode.db`
   (session/message/part tables, JSON blobs in `data`; schema verified 2026-07-22)
 - `src/parser.ts` — transcript → condensed exchanges; exclusion marker handling
-- `src/embed.ts` — Transformers.js singleton, CLS-pooled normalized embeddings
+- `src/embed.ts` — embedding host/client; lazy Node sidecar by default
+- `src/embed-sidecar.mjs` — persistent Node 20+ Transformers.js server (NDJSON)
+- `src/embed-inline.ts` — explicit lazy inline escape hatch; unsafe in affected Bun hosts
 - `src/store.ts` — index SQLite DB; brute-force cosine vector search (**the**
   swap point if an ANN index is ever needed) + FTS5 BM25 lexical search, fused
   on demand via reciprocal rank fusion. Two-phase: score candidates on
@@ -27,7 +29,7 @@ Semantic search over past OpenCode conversations via native plugin tools.
   (`queries.ts`, `corpus.json`, `results-*`) live in `eval/private/`, which is
   gitignored wholesale — drop any new private artifact there, no gitignore
   edit needed; see its README
-- Tests: `bun test` (parser + store smoke tests); `bun run typecheck`
+- Tests: `bun test` (parser/store/reader/sidecar smoke tests); `bun run typecheck`
 - `spikes/` — Phase 0 verification + plugin harness (run with `bun run`)
 
 ## Hard-won facts (don't rediscover)
@@ -97,11 +99,13 @@ Semantic search over past OpenCode conversations via native plugin tools.
   the no-`as` rule: narrow via schemas, never assertions (the two documented
   `as Float32Array` casts in `embed.ts`/`eval` are the sanctioned transformers.js
   typing-gap exceptions).
-- Plugin runs inside OpenCode's Bun runtime — no native deps, no postinstall
-  assumptions. `onnxruntime-node` ships all platform binaries in its npm
-  tarball, so the blocked postinstall under `bun install` is harmless for npm
-  consumers. `trustedDependencies` in package.json only affects repo
-  contributors.
+- Plugin runs inside OpenCode's Bun runtime. Transformers.js and its native ML
+  addons (`onnxruntime-node`, `sharp`) MUST load only in the persistent Node 20+
+  sidecar, never on plugin import. The host defaults to `EPISODIC_EMBED_MODE=sidecar`;
+  `inline` dynamically imports the backend only at first embedding request and is
+  unsafe in affected OpenCode/Bun versions. Text search and transcript reads do
+  not embed and therefore work without Node. `onnxruntime-node` ships platform
+  binaries in its npm tarball; `trustedDependencies` only affects contributors.
 - The `DO NOT INDEX THIS CHAT` exclusion marker is matched as a bare substring
   anywhere in any message part (broader than upstream's full instruction-tag
   match), so it also fires on conversations that merely quote the phrase —
@@ -135,7 +139,9 @@ Semantic search over past OpenCode conversations via native plugin tools.
   valid (v3↔v4 happened to be identical; don't assume that holds).
 - Reindex manually with `bun run src/cli.ts sync` (idempotent; watermark-based).
 - Releases follow `docs/RELEASE.md`; the artifact gate is
-  `bash spikes/pack-smoke.sh` (pack → clean install → import → embed).
+  `bash spikes/pack-smoke.sh` (pack → clean install → import → real Node-sidecar
+  embed). Keep `src/embed-sidecar.mjs` included in the npm artifact and run the
+  offline fake-sidecar protocol tests without downloading a model.
   OpenCode does NOT auto-update npm plugins: its cache
   (`~/.cache/opencode/packages/<spec>/`) short-circuits on any existing
   install, so a bare package name resolves `@latest` once and stays pinned
