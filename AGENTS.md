@@ -128,13 +128,6 @@ Semantic search over past OpenCode conversations via native plugin tools.
 
 ## Conventions
 
-- Keep repository discovery inside the checked-out repository. Multica runs are
-  headless, so broad `glob`/`grep` searches under `~`, `~/.cache`, or other
-  external directories can wait forever on an interactive permission prompt
-  while the parent waits on a subagent, eventually triggering the idle watchdog.
-  When host OpenCode state is required, query the narrow known path directly
-  (for example `~/.local/share/opencode/opencode.db`) instead of searching parent
-  directories.
 - Verify empirically before building (see `spikes/`); run
   `bun run spikes/plugin-harness.ts` after changing the plugin.
 - When bumping `@huggingface/transformers`, capture baseline embeddings
