@@ -1,11 +1,68 @@
 // Simulates the OpenCode plugin runtime: mock ctx, call the factory,
 // exercise the event hook and both tools.
-// Uses a throwaway index DB in /tmp so the live index is never touched.
+// Uses throwaway source and index DBs in /tmp so live data is never touched.
+import { Database } from "bun:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.EPISODIC_INDEX_DB = join(mkdtempSync(join(tmpdir(), "episodic-harness-")), "index.db");
+const harnessDir = mkdtempSync(join(tmpdir(), "episodic-harness-"));
+const sourcePath = join(harnessDir, "opencode.db");
+process.env.EPISODIC_SOURCE_DB = sourcePath;
+process.env.EPISODIC_INDEX_DB = join(harnessDir, "index.db");
+
+const fixture = new Database(sourcePath);
+fixture.run(`CREATE TABLE session (
+  id TEXT, project_id TEXT, parent_id TEXT, title TEXT, directory TEXT,
+  time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+)`);
+fixture.run(`CREATE TABLE message (
+  id TEXT, session_id TEXT, time_created INTEGER, data TEXT
+)`);
+fixture.run(`CREATE TABLE part (
+  id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT
+)`);
+const sessionId = "ses_harness";
+const created = Date.UTC(2026, 0, 2);
+fixture.run(
+  `INSERT INTO session
+   (id, project_id, parent_id, title, directory, time_created, time_updated, time_archived)
+   VALUES (?, ?, NULL, ?, ?, ?, ?, NULL)`,
+  [sessionId, "proj_harness", "Episodic memory architecture", process.cwd(), created, created]
+);
+fixture.run("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)", [
+  "msg_user",
+  sessionId,
+  created,
+  JSON.stringify({ role: "user" }),
+]);
+fixture.run("INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)", [
+  "msg_assistant",
+  sessionId,
+  created + 1,
+  JSON.stringify({ role: "assistant" }),
+]);
+fixture.run(
+  "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)",
+  [
+    "part_user",
+    "msg_user",
+    sessionId,
+    created,
+    JSON.stringify({ type: "text", text: "How should episodic memory architecture work?" }),
+  ]
+);
+fixture.run(
+  "INSERT INTO part (id, message_id, session_id, time_created, data) VALUES (?, ?, ?, ?, ?)",
+  [
+    "part_assistant",
+    "msg_assistant",
+    sessionId,
+    created + 1,
+    JSON.stringify({ type: "text", text: "Use local embeddings and a SQLite index." }),
+  ]
+);
+fixture.close();
 
 import EpisodicMemory from "../plugin/episodic-memory";
 import type { PluginInput, ToolContext } from "@opencode-ai/plugin";
@@ -46,16 +103,12 @@ const ctx: ToolContext = {
   ask: async () => {},
 };
 
-// 1. event hook (session.idle for a real session id)
+// 1. event hook (session.idle for the fixture session)
 const { openSource, listSessions } = await import("../src/reader");
 const source = openSource();
 const sessions = listSessions(source);
-if (sessions.length === 0) {
-  throw new Error(
-    "harness error: source opencode.db has zero sessions — cannot exercise the reindex hook. Populate opencode.db or point EPISODIC_SOURCE_DB at a DB with sessions."
-  );
-}
-const target = sessions[sessions.length - 1];
+if (sessions.length !== 1 || sessions[0].id !== sessionId) throw new Error("harness error: fixture session missing");
+const target = sessions[0];
 await hooks.event({
   event: { type: "session.idle", properties: { sessionID: target.id } },
 });
@@ -78,16 +131,22 @@ const result = await hooks.tool.episodic_search.execute(
   { query: "episodic memory architecture decisions", limit: 3 },
   ctx
 );
+if (typeof result !== "string" || !result.includes(sessionId) || !result.includes("local embeddings")) {
+  throw new Error("harness error: episodic_search did not return the fixture conversation");
+}
 console.log("=== episodic_search ===");
-console.log(typeof result === "string" ? result.slice(0, 900) : result);
+console.log(result.slice(0, 900));
 
 // 3. episodic_read (indexed fallback path, no live DB dependency)
 const out = await hooks.tool.episodic_read.execute(
   { session_id: target.id, indexed: true },
   ctx
 );
+if (typeof out !== "string" || !out.includes("How should episodic memory architecture work?") || !out.includes("local embeddings")) {
+  throw new Error("harness error: episodic_read did not return the indexed fixture transcript");
+}
 console.log("=== episodic_read (indexed) ===");
-console.log(typeof out === "string" ? out.slice(0, 400) : out);
+console.log(out.slice(0, 400));
 
 console.log("\nPlugin harness OK.");
 process.exit(0);
