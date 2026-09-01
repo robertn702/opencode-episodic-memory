@@ -77,27 +77,25 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
             before: before.ms,
             text: args.text,
           };
+          const noHits = () => isIndexEmpty(index)
+            ? "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations."
+            : "No matching past conversations found.";
           if (args.mode === "text") {
             const hits = textSearch(index, args.query, opts);
-            if (hits.length === 0) {
-              if (isIndexEmpty(index)) return "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations.";
-              return "No matching past conversations found.";
-            }
+            if (hits.length === 0) return noHits();
             return formatHits(hits, 400, "score");
           }
           let vector: Float32Array;
           try {
             vector = (await embedQuery(args.query))[0];
           } catch (e) {
-            return `Semantic search unavailable: embedding failed (${e instanceof Error ? e.message : e}). Use mode: "text" for embedding-free lexical search, or run \`bun run src/cli.ts doctor\`.`;
+            await log("warn", `episodic_search embedding failed: ${e instanceof Error ? e.message : e}`);
+            return 'Semantic search unavailable: the embedding backend failed. Use mode: "text" for embedding-free lexical search, or run `bun run src/cli.ts doctor` for details.';
           }
           const hits = args.mode === "hybrid"
             ? search(index, vector, { ...opts, queryText: args.query, hybrid: true })
             : search(index, vector, opts);
-          if (hits.length === 0) {
-            if (isIndexEmpty(index)) return "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations.";
-            return "No matching past conversations found.";
-          }
+          if (hits.length === 0) return noHits();
           // Hybrid hits carry RRF scores (~0.03), not cosine — label them "rrf".
           return formatHits(hits, 400, args.mode === "hybrid" ? "rrf" : "score");
         },

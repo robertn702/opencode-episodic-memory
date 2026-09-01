@@ -37,6 +37,10 @@ echo "== opencode server-entrypoint resolution =="
 bun run spikes/verify-opencode-entrypoint.ts "$WORK/cache/node_modules/opencode-episodic-memory"
 
 echo "== packaged Node sidecar embed smoke (downloads ~110MB model on first run) =="
+SIDECAR="$WORK/cache/node_modules/opencode-episodic-memory/src/embed-sidecar.mjs"
+[ -f "$SIDECAR" ] || { echo "missing packaged sidecar: $SIDECAR"; exit 1; }
+echo "packaged sidecar present: $SIDECAR"
+export EPISODIC_EMBED_MODE=sidecar
 (cd "$WORK/cache" && bun -e "
 const { embedQuery } = await import('./node_modules/opencode-episodic-memory/src/embed.ts');
 const [v] = await embedQuery('pack smoke test');
