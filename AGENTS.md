@@ -99,13 +99,14 @@ Semantic search over past OpenCode conversations via native plugin tools.
   the no-`as` rule: narrow via schemas, never assertions (the two documented
   `as Float32Array` casts in `embed.ts`/`eval` are the sanctioned transformers.js
   typing-gap exceptions).
-- Plugin runs inside OpenCode's Bun runtime. Transformers.js and its native ML
-  addons (`onnxruntime-node`, `sharp`) MUST load only in the persistent Node 20+
-  sidecar, never on plugin import. The host defaults to `EPISODIC_EMBED_MODE=sidecar`;
-  `inline` dynamically imports the backend only at first embedding request and is
-  unsafe in affected OpenCode/Bun versions. Text search and transcript reads do
-  not embed and therefore work without Node. `onnxruntime-node` ships platform
-  binaries in its npm tarball; `trustedDependencies` only affects contributors.
+- Plugin runs inside OpenCode's Bun runtime. By default, Transformers.js and its
+  native ML addons (`onnxruntime-node`, `sharp`) load only in the persistent Node
+  20+ sidecar, never on plugin import. `EPISODIC_EMBED_MODE=inline` is an explicit
+  escape hatch that lazily imports the backend on the first embedding request in
+  Bun; it is unsafe in affected OpenCode/Bun versions. Text search and transcript
+  reads do not embed and therefore work without Node. `onnxruntime-node` ships
+  platform binaries in its npm tarball; `trustedDependencies` only affects
+  contributors.
 - The `DO NOT INDEX THIS CHAT` exclusion marker is matched as a bare substring
   anywhere in any message part (broader than upstream's full instruction-tag
   match), so it also fires on conversations that merely quote the phrase —

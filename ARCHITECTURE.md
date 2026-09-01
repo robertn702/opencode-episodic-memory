@@ -47,7 +47,7 @@ flowchart LR
 
     OCDB --> R --> P --> E
     E <-->|NDJSON stdin/stdout| ES
-    ES --> S
+    E --> S
     S <--> IDB
     PLG --> S
     CLI --> S
@@ -171,8 +171,10 @@ sequenceDiagram
                 I->>S: replaceSessionChunks([], status="empty")
             else
                 I->>E: embed(exchangeTexts)  [≤2000 chars each]
-                E->>N: NDJSON {id, texts}
-                N-->>E: NDJSON {id, vectors}
+                loop capped batches (32 texts by default, max 64)
+                    E->>N: NDJSON {id, texts}
+                    N-->>E: NDJSON {id, vectors}
+                end
                 E-->>I: Float32Array[768] × n
                 I->>S: replaceSessionChunks(chunks, status="indexed")
                 Note over S: transaction — upsert session,<br/>delete old chunks, insert new.<br/>FTS triggers fire automatically
@@ -203,8 +205,8 @@ Key properties:
 ```mermaid
 flowchart TB
     Q[query text] --> EQ["embedQuery in Bun<br/>prepend retrieval prefix,<br/>truncate at 2000 chars"]
-    EQ --> N["Node sidecar<br/>embed 768-dim"]
-    N --> V["scoreVector<br/>brute-force cosine over all<br/>candidate embedding blobs<br/>+ time/text filters + minScore"]
+    EQ <-->|NDJSON| N["Node sidecar<br/>embed 768-dim"]
+    EQ --> V["scoreVector<br/>brute-force cosine over all<br/>candidate embedding blobs<br/>+ time/text filters + minScore"]
 
     subgraph Modes["Retrieval modes (store.search / store.textSearch)"]
         V --> D{mode?}
@@ -262,7 +264,7 @@ silently masked).
 
 ## Directory guide
 
-```
+```text
 src/       core library (reader, parser, embed host/client, inline backend, Node sidecar, store, indexer, format, cli) + tests
 plugin/    OpenCode plugin entrypoint (the npm package's main)
 skills/    remembering-conversations skill (agent recall behavior)

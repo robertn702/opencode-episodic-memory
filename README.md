@@ -52,11 +52,13 @@ Or edit `~/.config/opencode/opencode.json` manually:
 }
 ```
 
-Semantic indexing and vector/hybrid search require a system **Node 20+** binary
-(`node` by default). The first embedding run downloads the model (~100 MB,
-cached afterwards). The model and its native runtime live in that Node sidecar,
-not inside OpenCode's Bun/TUI process. `episodic_read` and lexical text search
-remain available without Node.
+Default sidecar-mode semantic indexing and vector/hybrid search require a system
+**Node 20+** binary (`node` by default). The first embedding run downloads the
+model (~100 MB, cached afterwards). The model and its native runtime live in
+that Node sidecar, not inside OpenCode's Bun/TUI process. Explicit
+`EPISODIC_EMBED_MODE=inline` works without Node but is unsafe in affected
+OpenCode/Bun versions. `episodic_read` and lexical text search also remain
+available without Node.
 
 Install the skill so the agent knows when to search, via the
 [`skills` CLI](https://github.com/vercel-labs/skills):
@@ -129,6 +131,9 @@ instruction-tag match — the intent is the same, but our matching is literal.
 | `EPISODIC_EMBED_MODEL` | `Snowflake/snowflake-arctic-embed-m-v1.5` | Transformers.js embedding model |
 | `EPISODIC_EMBED_MODE` | `sidecar` | `sidecar` runs embeddings in Node; `inline` is an explicit escape hatch |
 | `EPISODIC_NODE_BINARY` | `node` | Node 20+ executable used by sidecar mode |
+| `EPISODIC_EMBED_BATCH_SIZE` | `32` | Texts per sidecar request (1-64) |
+| `EPISODIC_EMBED_READY_TIMEOUT_MS` | `600000` | Maximum wait for sidecar/model startup |
+| `EPISODIC_EMBED_REQUEST_TIMEOUT_MS` | `120000` | Maximum wait for a post-startup embedding request |
 
 `EPISODIC_EMBED_MODE=inline` loads Transformers.js native addons directly in
 OpenCode's embedded Bun process. It exists only as an explicit compatibility

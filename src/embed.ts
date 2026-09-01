@@ -1,6 +1,7 @@
 // Local, offline embeddings. The default backend lives in a system-Node
 // sidecar so importing the OpenCode plugin never loads ML native addons into
 // its embedded Bun process.
+import { fileURLToPath } from "node:url";
 
 export const DEFAULT_MODEL = "Snowflake/snowflake-arctic-embed-m-v1.5";
 
@@ -11,6 +12,12 @@ export const QUERY_PREFIX = "Represent this sentence for searching relevant pass
 // Upstream measured retrieval quality peaks at 2000 chars; longer inputs
 // degrade embeddings (and this model's window is 512 tokens anyway).
 export const MAX_CHARS = 2000;
+
+const DEFAULT_BATCH_SIZE = 32;
+const MAX_BATCH_SIZE = 64;
+const DEFAULT_READY_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 export type EmbedMode = "sidecar" | "inline";
 
@@ -44,6 +51,17 @@ export function getEmbedMode(): EmbedMode {
 
 function tail(value: string, addition: string): string {
   return (value + addition).slice(-8_192);
+}
+
+function positiveIntegerEnv(name: string, defaultValue: number, maximum: number): number {
+  const value = process.env[name];
+  if (value === undefined) return defaultValue;
+  if (!/^[1-9]\d*$/.test(value)) throw new Error(`Invalid ${name} ${JSON.stringify(value)}; expected an integer from 1 to ${maximum}.`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > maximum) {
+    throw new Error(`Invalid ${name} ${JSON.stringify(value)}; expected an integer from 1 to ${maximum}.`);
+  }
+  return parsed;
 }
 
 function sidecarError(message: string, child: Sidecar): Error {
@@ -105,7 +123,9 @@ function handleLine(child: Sidecar, line: string): void {
   const record = response as Record<string, unknown>;
   if ("ready" in record) {
     if (record.ready === true) child.resolveReady();
-    else child.rejectReady(new Error(`Embedding sidecar failed to start: ${typeof record.error === "string" ? record.error : "unknown error"}`));
+    else {
+      sidecarGone(child, new SidecarUnavailableError(`Embedding sidecar failed to start: ${typeof record.error === "string" ? record.error : "unknown error"}`));
+    }
     return;
   }
   if (typeof record.id !== "number" || !Number.isSafeInteger(record.id)) {
@@ -171,7 +191,7 @@ async function drainStderr(child: Sidecar): Promise<void> {
 function startSidecar(): Sidecar {
   if (sidecar) return sidecar;
   const nodeBinary = process.env.EPISODIC_NODE_BINARY ?? "node";
-  const sidecarPath = decodeURIComponent(new URL("./embed-sidecar.mjs", import.meta.url).pathname);
+  const sidecarPath = fileURLToPath(new URL("./embed-sidecar.mjs", import.meta.url));
   let resolveReady!: () => void;
   let rejectReady!: (error: Error) => void;
   const ready = new Promise<void>((resolve, reject) => {
@@ -184,7 +204,13 @@ function startSidecar(): Sidecar {
 
   let childProcess: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
-    childProcess = Bun.spawn([nodeBinary, sidecarPath], { stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true });
+    childProcess = Bun.spawn([nodeBinary, sidecarPath], {
+      env: process.env,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    });
   } catch (error) {
     throw new Error(`Could not start embedding sidecar using ${JSON.stringify(nodeBinary)}. Install Node 20+ or set EPISODIC_NODE_BINARY: ${String(error)}`);
   }
@@ -202,25 +228,61 @@ function startSidecar(): Sidecar {
   return child;
 }
 
-async function requestSidecar(texts: string[], retried = false): Promise<Float32Array[]> {
+function awaitReady(child: Sidecar, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      const error = new SidecarUnavailableError(`Embedding sidecar did not become ready within ${timeoutMs}ms`);
+      sidecarGone(child, error);
+      reject(error);
+    }, timeoutMs);
+    child.ready.then(
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function requestSidecar(texts: string[], readyTimeoutMs: number, requestTimeoutMs: number, retried = false): Promise<Float32Array[]> {
   let child: Sidecar;
   try {
     child = startSidecar();
-    await child.ready;
+    await awaitReady(child, readyTimeoutMs);
     const id = nextRequestId++;
     return await new Promise<Float32Array[]>((resolve, reject) => {
-      child.pending.set(id, { resolve, reject, count: texts.length });
+      const timeout = setTimeout(() => {
+        sidecarGone(child, new SidecarUnavailableError(`Embedding sidecar request timed out after ${requestTimeoutMs}ms`));
+      }, requestTimeoutMs);
+      const resolveRequest = (vectors: Float32Array[]) => {
+        clearTimeout(timeout);
+        resolve(vectors);
+      };
+      const rejectRequest = (error: Error) => {
+        clearTimeout(timeout);
+        reject(error);
+      };
+      child.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, count: texts.length });
+      if (sidecar !== child) {
+        child.pending.delete(id);
+        rejectRequest(new SidecarUnavailableError("Embedding sidecar became unavailable before the request was sent"));
+        return;
+      }
       try {
         child.process.stdin.write(`${JSON.stringify({ id, texts })}\n`);
       } catch (error) {
         child.pending.delete(id);
         const unavailable = new SidecarUnavailableError(`Could not write to embedding sidecar: ${String(error)}`);
         sidecarGone(child, unavailable);
-        reject(unavailable);
+        rejectRequest(unavailable);
       }
     });
   } catch (error) {
-    if (!retried && error instanceof SidecarUnavailableError) return requestSidecar(texts, true);
+    if (!retried && error instanceof SidecarUnavailableError) return requestSidecar(texts, readyTimeoutMs, requestTimeoutMs, true);
     throw error;
   }
 }
@@ -234,7 +296,14 @@ async function embedRaw(texts: string[]): Promise<Float32Array[]> {
     const { embedInline } = await import("./embed-inline.ts");
     return embedInline(prepared);
   }
-  return requestSidecar(prepared);
+  const batchSize = positiveIntegerEnv("EPISODIC_EMBED_BATCH_SIZE", DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE);
+  const readyTimeoutMs = positiveIntegerEnv("EPISODIC_EMBED_READY_TIMEOUT_MS", DEFAULT_READY_TIMEOUT_MS, MAX_TIMEOUT_MS);
+  const requestTimeoutMs = positiveIntegerEnv("EPISODIC_EMBED_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT_MS, MAX_TIMEOUT_MS);
+  const vectors: Float32Array[] = [];
+  for (let index = 0; index < prepared.length; index += batchSize) {
+    vectors.push(...await requestSidecar(prepared.slice(index, index + batchSize), readyTimeoutMs, requestTimeoutMs));
+  }
+  return vectors;
 }
 
 /** Embed documents (conversation chunks). No prefix. */
