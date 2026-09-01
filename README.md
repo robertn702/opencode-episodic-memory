@@ -54,7 +54,7 @@ Or edit `~/.config/opencode/opencode.json` manually:
 
 Default sidecar-mode semantic indexing and vector/hybrid search require a system
 **Node 20+** binary (`node` by default). The first embedding run downloads the
-model (~100 MB, cached afterwards). The model and its native runtime live in
+model (~100 MB, cached afterward). The model and its native runtime live in
 that Node sidecar, not inside OpenCode's Bun/TUI process. Explicit
 `EPISODIC_EMBED_MODE=inline` works without Node but is unsafe in affected
 OpenCode/Bun versions. `episodic_read` and lexical text search also remain
