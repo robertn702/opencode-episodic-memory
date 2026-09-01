@@ -1,0 +1,113 @@
+name: Publish npm package
+
+# A reviewed vX.Y.Z tag publishes the matching package version through npm
+# Trusted Publishing, then creates the GitHub release. No npm token is used.
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: npm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    # This name must match the npm Trusted Publisher configuration.
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record immutable source commit
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # npm Trusted Publishing requires Node >= 22.14.0. Do not set
+          # registry-url: its empty auth token suppresses npm's OIDC fallback.
+          node-version: "24"
+
+      - name: Check tag and package identity
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/check-npm-release.mjs "$RELEASE_TAG"
+
+      - name: Install npm CLI for Trusted Publishing
+        run: npm install --global npm@11.5.1 --registry=https://registry.npmjs.org
+
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      - run: node --test scripts/*.test.mjs
+      - run: bun run spikes/plugin-harness.ts
+      - run: bash spikes/pack-smoke.sh
+
+      - name: Pack immutable release artifact
+        id: artifact
+        run: |
+          pack_dir="$(mktemp -d)"
+          pack_json="$(npm pack --ignore-scripts --json --pack-destination "$pack_dir")"
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          node -e '
+            const results = JSON.parse(process.argv[1]);
+            const expectedName = process.argv[2];
+            const expectedVersion = process.argv[3];
+            if (!Array.isArray(results) || results.length !== 1) throw new Error("npm pack must return exactly one artifact");
+            const [result] = results;
+            if (result.name !== expectedName || result.version !== expectedVersion) throw new Error("npm pack returned the wrong package identity");
+            if (result.filename !== `${expectedName}-${expectedVersion}.tgz`) throw new Error("npm pack returned an unexpected filename");
+            if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(result.integrity ?? "")) throw new Error("npm pack returned an invalid integrity");
+          ' "$pack_json" "$package_name" "$package_version"
+          filename="$(node -e 'const [result] = JSON.parse(process.argv[1]); process.stdout.write(result.filename);' "$pack_json")"
+          integrity="$(node -e 'const [result] = JSON.parse(process.argv[1]); process.stdout.write(result.integrity);' "$pack_json")"
+          echo "path=$pack_dir/$filename" >> "$GITHUB_OUTPUT"
+          echo "integrity=$integrity" >> "$GITHUB_OUTPUT"
+
+      - name: Publish opencode-episodic-memory
+        env:
+          EXPECTED_INTEGRITY: ${{ steps.artifact.outputs.integrity }}
+          TARBALL_PATH: ${{ steps.artifact.outputs.path }}
+        run: node scripts/publish-npm-release.mjs "$TARBALL_PATH" "$EXPECTED_INTEGRITY"
+
+  release:
+    if: success()
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ needs.publish.outputs.source_sha }}
+        run: |
+          object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME")"
+          object_type="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).object.type)' "$object")"
+          object_sha="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).object.sha)' "$object")"
+          while [ "$object_type" = "tag" ]; do
+            object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha")"
+            object_type="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).object.type)' "$object")"
+            object_sha="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).object.sha)' "$object")"
+          done
+          if [ "$object_type" != "commit" ] || [ "$object_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::$GITHUB_REF_NAME resolves to $object_type $object_sha, expected commit $EXPECTED_SHA"
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub release $GITHUB_REF_NAME already exists"
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
