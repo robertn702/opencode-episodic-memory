@@ -1,12 +1,12 @@
 // OpenCode plugin: episodic memory over past conversations.
-// - Native tools: episodic_search, episodic_read
+// - Native tools: episodic_search, episodic_read_context, episodic_read
 // - Incremental reindex on session.idle (fire-and-forget, debounced)
 import { type Plugin, tool } from "@opencode-ai/plugin";
-import { openSource, getSession, getTranscriptChecked } from "../src/reader";
+import { openSource, getSession, getTranscriptChecked, getTranscriptContext } from "../src/reader";
 import { openIndex, search, textSearch, isIndexEmpty } from "../src/store";
 import { syncSession, syncAll, pruneOrphans } from "../src/indexer";
 import { embedQuery } from "../src/embed";
-import { parseDateArg, formatHits, renderTranscript } from "../src/format";
+import { parseDateArg, formatHits, renderTranscript, renderTranscriptContext } from "../src/format";
 
 export const EpisodicMemory: Plugin = async ({ client }) => {
   const log = (level: "info" | "warn" | "error", message: string) =>
@@ -56,7 +56,7 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
     tool: {
       episodic_search: tool({
         description:
-          "Semantic search over your PAST OpenCode conversations. Use when the user references prior work, past decisions, or previous sessions (e.g. 'how did we handle X', 'the conversation about Y', 'what did we decide about Z'). Returns dated excerpts with session IDs; follow up with episodic_read for the full conversation.",
+          "Semantic search over your PAST OpenCode conversations. Use when the user references prior work, past decisions, or previous sessions (e.g. 'how did we handle X', 'the conversation about Y', 'what did we decide about Z'). Returns dated excerpts, session IDs, and anchors. Prefer search -> episodic_read_context for a bounded live window -> episodic_read only when the full conversation is needed.",
         args: {
           query: tool.schema.string().describe("Natural-language description of what you're looking for"),
           text: tool.schema.string().optional().describe("Exact substring to require in results (ANDed with semantic ranking)"),
@@ -98,6 +98,28 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
           if (hits.length === 0) return noHits();
           // Hybrid hits carry RRF scores (~0.03), not cosine — label them "rrf".
           return formatHits(hits, 400, args.mode === "hybrid" ? "rrf" : "score");
+        },
+      }),
+
+      episodic_read_context: tool({
+        description:
+          "Read a bounded live-source message window around an anchor from episodic_search. Use the returned session_id and anchor_message_id; this cannot read deleted sessions or indexed-only excerpts.",
+        args: {
+          session_id: tool.schema.string().describe("Session ID from episodic_search, e.g. ses_..."),
+          anchor_message_id: tool.schema.string().describe("Anchor message ID from episodic_search"),
+          before: tool.schema.number().optional().describe("Messages before the anchor, 0-20 (default 3)"),
+          after: tool.schema.number().optional().describe("Messages after the anchor, 0-20 (default 3)"),
+        },
+        async execute(args) {
+          const source = openSource();
+          const context = getTranscriptContext(source, args.session_id, args.anchor_message_id, args.before, args.after);
+          if (!context.ok) {
+            if (context.reason === "unknown_session") throw new Error(`No live conversation found for session ${args.session_id}.`);
+            if (context.reason === "excluded") throw new Error("Session is marked private (exclusion marker present); context withheld.");
+            if (context.reason === "invalid_anchor") throw new Error(`Anchor message ${args.anchor_message_id} is stale or invalid for session ${args.session_id}.`);
+            throw new Error("before and after must be non-negative integers no greater than 20.");
+          }
+          return renderTranscriptContext(context.session, context);
         },
       }),
 

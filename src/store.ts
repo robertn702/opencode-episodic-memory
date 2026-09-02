@@ -31,6 +31,7 @@ export function openIndex(path: string = indexDbPath()): Database {
   mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path);
   db.run("PRAGMA journal_mode = WAL");
+  db.run("PRAGMA busy_timeout = 5000");
   db.run(`CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL,
@@ -46,6 +47,7 @@ export function openIndex(path: string = indexDbPath()): Database {
     session_id TEXT NOT NULL,
     seq INTEGER NOT NULL,
     time_created INTEGER NOT NULL,
+    anchor_message_id TEXT,
     text TEXT NOT NULL,
     embedding BLOB NOT NULL,
     PRIMARY KEY (session_id, seq)
@@ -74,8 +76,43 @@ export function openIndex(path: string = indexDbPath()): Database {
     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
     INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
   END`);
+  migrateAnchors(db);
   migrateFts(db);
   return db;
+}
+
+// Existing indexes predate per-exchange source anchors. Adding this nullable
+// column preserves the chunks table's implicit rowids, which the external-
+// content FTS table depends on. An immediate transaction serializes concurrent
+// openIndex calls before the schema check; the busy timeout above lets a second
+// opener wait for the first migration rather than racing a duplicate ALTER.
+// Mark every existing session stale so its next normal sync replaces chunks with
+// anchored versions; do not rebuild or VACUUM.
+function migrateAnchors(db: Database): void {
+  // The steady-state path stays read-like: don't take a write lock just to
+  // confirm an already-migrated index has its anchor column.
+  if (hasAnchorColumn(db)) return;
+  let inTransaction = false;
+  try {
+    db.run("BEGIN IMMEDIATE");
+    inTransaction = true;
+    // A concurrent first opener may have completed migration while this caller
+    // waited for the write lock, so re-check inside the atomic transaction.
+    if (!hasAnchorColumn(db)) {
+      db.run("ALTER TABLE chunks ADD COLUMN anchor_message_id TEXT");
+      db.run("UPDATE sessions SET source_time_updated = -1");
+    }
+    db.run("COMMIT");
+    inTransaction = false;
+  } catch (error) {
+    if (inTransaction) db.run("ROLLBACK");
+    throw error;
+  }
+}
+
+function hasAnchorColumn(db: Database): boolean {
+  return db.prepare<{ name: string }, []>("PRAGMA table_info(chunks)").all()
+    .some((column) => column.name === "anchor_message_id");
 }
 
 // One-time FTS backfill for index DBs created before FTS existed: they have
@@ -109,7 +146,7 @@ export function getIndexedSession(db: Database, id: string): IndexedSession | nu
 export function replaceSessionChunks(
   db: Database,
   s: { id: string; project_id: string; parent_id: string | null; title: string; directory: string; time_created: number; source_time_updated: number },
-  chunks: { seq: number; time_created: number; text: string; embedding: Float32Array }[],
+  chunks: { seq: number; time_created: number; text: string; embedding: Float32Array; anchor_message_id?: string | null }[],
   status: string = "indexed"
 ): void {
   db.transaction(() => {
@@ -124,9 +161,9 @@ export function replaceSessionChunks(
     );
     db.run("DELETE FROM chunks WHERE session_id = ?", [s.id]);
     const ins = db.prepare(
-      "INSERT INTO chunks (session_id, seq, time_created, text, embedding) VALUES (?, ?, ?, ?, ?)"
+      "INSERT INTO chunks (session_id, seq, time_created, anchor_message_id, text, embedding) VALUES (?, ?, ?, ?, ?, ?)"
     );
-    for (const c of chunks) ins.run(s.id, c.seq, c.time_created, c.text, c.embedding);
+    for (const c of chunks) ins.run(s.id, c.seq, c.time_created, c.anchor_message_id ?? null, c.text, c.embedding);
   })();
 }
 
@@ -134,6 +171,7 @@ export interface SearchHit {
   session_id: string;
   seq: number;
   time_created: number;
+  anchor_message_id?: string | null;
   text: string;
   score: number;
   title: string;
@@ -217,8 +255,8 @@ function scoreVector(db: Database, queryVec: Float32Array, opts: SearchOptions):
 // a point lookup per hit on the (session_id, seq) primary key. K is bounded by
 // the caller's limit (≤ 50 in the plugin), so this is a tiny handful of reads.
 function hydrate(db: Database, scored: ScoredChunk[]): SearchHit[] {
-  const detail = db.prepare<{ text: string; title: string; directory: string }, [string, number]>(
-    `SELECT c.text, s.title, s.directory
+  const detail = db.prepare<{ text: string; anchor_message_id: string | null; title: string; directory: string }, [string, number]>(
+    `SELECT c.text, c.anchor_message_id, s.title, s.directory
      FROM chunks c JOIN sessions s ON s.id = c.session_id
      WHERE c.session_id = ? AND c.seq = ?`
   );
@@ -231,7 +269,7 @@ function hydrate(db: Database, scored: ScoredChunk[]): SearchHit[] {
     if (!d) continue;
     hits.push({
       session_id: h.session_id, seq: h.seq, time_created: h.time_created,
-      text: d.text, score: h.score, title: d.title, directory: d.directory,
+      text: d.text, anchor_message_id: d.anchor_message_id, score: h.score, title: d.title, directory: d.directory,
     });
   }
   return hits;

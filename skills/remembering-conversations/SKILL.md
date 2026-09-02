@@ -1,12 +1,12 @@
 ---
 name: remembering-conversations
-description: Recall past OpenCode conversations when the user references previous work, past decisions, or earlier sessions — "how did we handle X", "the conversation about Y", "what did we decide", "we tried this before", "last week we...". Use the episodic_search and episodic_read tools to search semantically and read full transcripts.
+description: Recall past OpenCode conversations when the user references previous work, past decisions, or earlier sessions — "how did we handle X", "the conversation about Y", "what did we decide", "we tried this before", "last week we...". Use episodic_search, then episodic_read_context for a bounded window, and episodic_read only when the full transcript is needed.
 ---
 
 # Remembering Conversations
 
 You have episodic memory: every past OpenCode session is indexed and searchable
-via two native tools.
+via three native tools.
 
 ## When to search
 
@@ -29,12 +29,15 @@ conversation — the index is for cross-session recall, not code search.
      (an error string, a flag name, a file path).
    - `mode: "text"` for lexical BM25 search: every query word must appear (token-based
      AND, BM25-ranked) — not phrase/adjacency or substring matching.
-2. Skim the returned excerpts (date, session title, score). Similarity scores are
+2. Skim the returned excerpts (date, session title, score, and anchor). Similarity scores are
    NOT calibrated probabilities: ≥ ~0.55 is a strong match, 0.4–0.55 is likely
    relevant, < ~0.35 is weak or merely adjacent — judge by the snippet, not the
    number, and say when the corpus doesn't really contain the topic.
-3. `episodic_read` with the session ID for the full transcript when an excerpt
-   isn't enough.
+3. `episodic_read_context` with the result's session ID and anchor message ID to
+   inspect a small chronological window first. It is live-source only: private,
+   deleted, stale, and legacy unanchored results cannot expand.
+4. `episodic_read` with the session ID only when that context isn't enough and
+   the full transcript is needed.
 
 ## Answering
 

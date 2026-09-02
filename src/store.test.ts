@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openIndex, replaceSessionChunks, search, textSearch, getIndexedSession } from "./store";
 import { pruneOrphans } from "./indexer";
+import { formatHit } from "./format";
 import type { SourceSession } from "./reader";
 
 const dir = mkdtempSync(join(tmpdir(), "episodic-store-test-"));
@@ -20,13 +21,14 @@ const meta = {
 describe("store", () => {
   test("replaceSessionChunks + search round-trip ranks by cosine", () => {
     replaceSessionChunks(db, meta, [
-      { seq: 0, time_created: 1000, text: "alpha chunk", embedding: new Float32Array([1, 0]) },
-      { seq: 1, time_created: 1001, text: "beta chunk", embedding: new Float32Array([0, 1]) },
+      { seq: 0, time_created: 1000, anchor_message_id: "msg_alpha", text: "alpha chunk", embedding: new Float32Array([1, 0]) },
+      { seq: 1, time_created: 1001, anchor_message_id: "msg_beta", text: "beta chunk", embedding: new Float32Array([0, 1]) },
     ]);
     const hits = search(db, new Float32Array([1, 0]));
     expect(hits).toHaveLength(2);
     expect(hits[0].text).toBe("alpha chunk");
     expect(hits[0].score).toBeCloseTo(1);
+    expect(hits[0].anchor_message_id).toBe("msg_alpha");
     expect(hits[1].score).toBeCloseTo(0);
     expect(getIndexedSession(db, "ses_test")?.title).toBe("Test session");
   });
@@ -123,8 +125,130 @@ describe("store", () => {
     const migrated = openIndex(p);
     try {
       expect(textSearch(migrated, "legacy").map((h) => h.text)).toEqual(["legacy migrated searchable content"]);
+      expect(textSearch(migrated, "legacy")[0].anchor_message_id).toBeNull();
+      expect(formatHit(textSearch(migrated, "legacy")[0])).toContain("anchor: unavailable (refresh/reindex required)");
+      expect(getIndexedSession(migrated, "ses_leg")?.source_time_updated).toBe(-1);
+      expect(migrated.prepare<{ n: number }, []>("SELECT COUNT(*) n FROM pragma_table_info('chunks') WHERE name = 'anchor_message_id'").get()?.n).toBe(1);
     } finally {
       migrated.close();
+    }
+  });
+
+  test("anchor migration preserves v1 FTS rowids and postings; subsequent opens use the schema fast path", () => {
+    const p = join(dir, "v1-populated.db");
+    const legacy = new Database(p);
+    legacy.run(`CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL,
+      directory TEXT NOT NULL, time_created INTEGER NOT NULL, source_time_updated INTEGER NOT NULL,
+      indexed_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'indexed')`);
+    legacy.run(`CREATE TABLE chunks (
+      session_id TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+      text TEXT NOT NULL, embedding BLOB NOT NULL, PRIMARY KEY (session_id, seq))`);
+    legacy.run("CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='chunks', content_rowid='rowid')");
+    legacy.run(`CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+      INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+    END`);
+    legacy.run(`CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+      INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+    END`);
+    legacy.run(`CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+      INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+      INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+    END`);
+    legacy.run("INSERT INTO sessions (id, project_id, parent_id, title, directory, time_created, source_time_updated, indexed_at, status) VALUES ('ses_v1','p',NULL,'V1','/tmp',1,1,1,'indexed')");
+    legacy.run("INSERT INTO chunks (session_id, seq, time_created, text, embedding) VALUES ('ses_v1',0,1,'orchid unique term',?)", [new Float32Array([1, 0])]);
+    legacy.run("INSERT INTO chunks (session_id, seq, time_created, text, embedding) VALUES ('ses_v1',1,2,'marigold distinct term',?)", [new Float32Array([0, 1])]);
+    legacy.run("PRAGMA user_version = 1");
+    const rowids = legacy.prepare<{ rowid: number; seq: number }, []>("SELECT rowid, seq FROM chunks ORDER BY seq").all();
+    expect(legacy.prepare<{ n: number }, []>("SELECT COUNT(*) n FROM chunks_fts").get()?.n).toBe(2);
+    legacy.close();
+
+    const migrated = openIndex(p);
+    try {
+      expect(migrated.prepare<{ rowid: number; seq: number }, []>("SELECT rowid, seq FROM chunks ORDER BY seq").all()).toEqual(rowids);
+      expect(textSearch(migrated, "orchid").map((hit) => hit.seq)).toEqual([0]);
+      expect(textSearch(migrated, "marigold").map((hit) => hit.seq)).toEqual([1]);
+      expect(migrated.prepare<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(1);
+    } finally {
+      migrated.close();
+    }
+    // The anchor column now exists, so this directly exercises the no-write-lock
+    // migration fast path rather than entering BEGIN IMMEDIATE again.
+    const reopened = openIndex(p);
+    try {
+      expect(reopened.prepare<{ rowid: number; seq: number }, []>("SELECT rowid, seq FROM chunks ORDER BY seq").all()).toEqual(rowids);
+      expect(textSearch(reopened, "orchid").map((hit) => hit.seq)).toEqual([0]);
+    } finally {
+      reopened.close();
+    }
+  });
+
+  test("concurrent first openers serialize the anchor migration", async () => {
+    const p = join(dir, "concurrent-first-open.db");
+    const legacy = new Database(p);
+    legacy.run("PRAGMA journal_mode = WAL");
+    legacy.run(`CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL,
+      directory TEXT NOT NULL, time_created INTEGER NOT NULL, source_time_updated INTEGER NOT NULL,
+      indexed_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'indexed')`);
+    legacy.run(`CREATE TABLE chunks (
+      session_id TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+      text TEXT NOT NULL, embedding BLOB NOT NULL, PRIMARY KEY (session_id, seq))`);
+    legacy.run("CREATE VIRTUAL TABLE chunks_fts USING fts5(text, content='chunks', content_rowid='rowid')");
+    legacy.run("CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text); END");
+    legacy.run("CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text); END");
+    legacy.run("CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text); INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text); END");
+    legacy.run("INSERT INTO sessions (id, project_id, parent_id, title, directory, time_created, source_time_updated, indexed_at, status) VALUES ('ses_race','p',NULL,'Race','/tmp',1,42,1,'indexed')");
+    legacy.run("INSERT INTO chunks (session_id, seq, time_created, text, embedding) VALUES ('ses_race',0,1,'concurrent orchid term',?)", [new Float32Array([1, 0])]);
+    legacy.run("INSERT INTO chunks (session_id, seq, time_created, text, embedding) VALUES ('ses_race',1,2,'concurrent marigold term',?)", [new Float32Array([0, 1])]);
+    legacy.run("PRAGMA user_version = 1");
+    const rowids = legacy.prepare<{ rowid: number; seq: number }, []>("SELECT rowid, seq FROM chunks ORDER BY seq").all();
+    legacy.close();
+
+    const storeModule = new URL("./store.ts", import.meta.url).href;
+    const workerCode = `import { openIndex } from ${JSON.stringify(storeModule)}; const db = openIndex(process.argv[1]); db.close();`;
+    const openers = Array.from({ length: 8 }, async () => {
+      const child = Bun.spawn([process.execPath, "-e", workerCode, p], { stdout: "ignore", stderr: "pipe" });
+      const result = await Promise.race([
+        child.exited.then((code) => ({ timedOut: false, code })),
+        new Promise<{ timedOut: true }>((resolve) => setTimeout(() => resolve({ timedOut: true }), 5_000)),
+      ]);
+      if (result.timedOut) {
+        child.kill();
+        throw new Error("concurrent openIndex worker timed out");
+      }
+      if (result.code !== 0) throw new Error(`concurrent openIndex worker exited ${result.code}`);
+    });
+    await Promise.all(openers);
+
+    const opened = openIndex(p);
+    try {
+      expect(opened.prepare<{ n: number }, []>("SELECT COUNT(*) n FROM pragma_table_info('chunks') WHERE name = 'anchor_message_id'").get()?.n).toBe(1);
+      expect(getIndexedSession(opened, "ses_race")?.source_time_updated).toBe(-1);
+      expect(opened.prepare<{ rowid: number; seq: number }, []>("SELECT rowid, seq FROM chunks ORDER BY seq").all()).toEqual(rowids);
+      expect(textSearch(opened, "orchid").map((hit) => hit.seq)).toEqual([0]);
+      expect(textSearch(opened, "marigold").map((hit) => hit.seq)).toEqual([1]);
+    } finally {
+      opened.close();
+    }
+  });
+
+  test("an already-migrated index opens while another connection holds a write lock", () => {
+    const p = join(dir, "already-migrated.db");
+    const initialized = openIndex(p);
+    initialized.close();
+    const writer = new Database(p);
+    writer.run("BEGIN IMMEDIATE");
+    try {
+      const opened = openIndex(p);
+      try {
+        expect(opened.prepare<{ n: number }, []>("SELECT COUNT(*) n FROM pragma_table_info('chunks') WHERE name = 'anchor_message_id'").get()?.n).toBe(1);
+      } finally {
+        opened.close();
+      }
+    } finally {
+      writer.run("ROLLBACK");
+      writer.close();
     }
   });
 

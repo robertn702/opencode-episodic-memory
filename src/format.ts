@@ -3,6 +3,12 @@
 // here so the two front-ends can't drift apart.
 import type { SourceMessage } from "./reader";
 import type { SearchHit } from "./store";
+import { Buffer } from "node:buffer";
+
+const MAX_CONTEXT_BODY_BYTES = 600;
+const MAX_CONTEXT_TOOLS_BYTES = 200;
+const MAX_CONTEXT_FIELD_BYTES = 100;
+const MAX_CONTEXT_SESSION_FIELD_BYTES = 300;
 
 // Discriminated result so callers handle the parse error explicitly (no cast to
 // strip the error arm off a union). `ms` is undefined when no date was given.
@@ -55,6 +61,46 @@ export function renderTranscript(
   return lines.join("\n");
 }
 
+// Render a bounded live-source window around a search-hit anchor. The helper in
+// reader.ts has already applied the privacy gate and validated the anchor.
+export function renderTranscriptContext(
+  meta: { title: string; time_created: number; directory: string; id: string },
+  context: { messages: SourceMessage[]; anchorIndex: number; sliceStart: number; total: number }
+): string {
+  const lines = [
+    `# ${truncateContext(meta.title, MAX_CONTEXT_SESSION_FIELD_BYTES)}`,
+    `${fmtDate(meta.time_created)} — ${truncateContext(meta.directory, MAX_CONTEXT_SESSION_FIELD_BYTES)} — ${truncateContext(meta.id, MAX_CONTEXT_FIELD_BYTES)}`,
+    `Context around message ${context.anchorIndex + 1}/${context.total}`,
+    "",
+  ];
+  for (const [offset, message] of context.messages.entries()) {
+    const position = context.sliceStart + offset;
+    const text = message.parts.filter((part) => part.type === "text" && part.text).map((part) => part.text).join("\n");
+    const tools = message.parts.filter((part) => part.type === "tool" && part.tool).map((part) => part.tool);
+    lines.push(`## ${truncateContext(message.role, MAX_CONTEXT_FIELD_BYTES)} — ${truncateContext(message.id, MAX_CONTEXT_FIELD_BYTES)} — ${position + 1}/${context.total}${position === context.anchorIndex ? " (anchor)" : ""}`);
+    if (text) lines.push(truncateContext(text, MAX_CONTEXT_BODY_BYTES));
+    if (tools.length) lines.push(truncateContext(`*(tools: ${tools.join(", ")})*`, MAX_CONTEXT_TOOLS_BYTES));
+    if (message.contextPartsOmitted) lines.push(`*(${message.contextPartsOmitted} parts omitted from bounded context)*`);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function truncateContext(value: string, byteLimit: number): string {
+  if (Buffer.byteLength(value, "utf8") <= byteLimit) return value;
+  const suffix = "... [truncated]";
+  const contentBudget = byteLimit - Buffer.byteLength(suffix, "utf8");
+  let bytes = 0;
+  let result = "";
+  for (const codePoint of value) {
+    const codePointBytes = Buffer.byteLength(codePoint, "utf8");
+    if (bytes + codePointBytes > contentBudget) break;
+    result += codePoint;
+    bytes += codePointBytes;
+  }
+  return result + suffix;
+}
+
 // One search hit as a markdown block. snippetLength defaults to 400 (plugin
 // tool output); the CLI passes 220 to keep terminal output brief. scoreLabel
 // names the score field: "score" for vector (cosine ~0.4–0.7) and BM25, "rrf"
@@ -62,7 +108,8 @@ export function renderTranscript(
 // AGENTS.md) so the number isn't misread against the cosine thresholds.
 export function formatHit(h: SearchHit, snippetLength = 400, scoreLabel = "score"): string {
   const snippet = h.text.replace(/\s+/g, " ").slice(0, snippetLength);
-  return `## ${fmtDate(h.time_created)} — ${h.title}\nsession: ${h.session_id}  ${scoreLabel}: ${h.score.toFixed(3)}\n${h.directory}\n> ${snippet}`;
+  const anchor = h.anchor_message_id ?? "unavailable (refresh/reindex required)";
+  return `## ${fmtDate(h.time_created)} — ${h.title}\nsession: ${h.session_id}  ${scoreLabel}: ${h.score.toFixed(3)}\nanchor: ${anchor}\n${h.directory}\n> ${snippet}`;
 }
 
 export function formatHits(hits: SearchHit[], snippetLength = 400, scoreLabel = "score"): string {
