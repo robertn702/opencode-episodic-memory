@@ -65,11 +65,10 @@ if (typeof factory !== "function") {
 }
 
 const hooks = await factory({ client: { app: { log: async () => {} } } });
-const tools = Object.keys(hooks.tool ?? {});
-for (const required of ["episodic_search", "episodic_read"]) {
-  if (!tools.includes(required)) {
-    throw new Error(`resolved entry missing tool "${required}" (got: ${tools.join(", ") || "none"})`);
-  }
+const tools = Object.keys(hooks.tool ?? {}).sort();
+const expectedTools = ["episodic_read_session", "episodic_read_window", "episodic_search"];
+if (tools.join(",") !== expectedTools.join(",")) {
+  throw new Error(`resolved entry has unexpected tools (got: ${tools.join(", ") || "none"})`);
 }
 console.log("tools registered:", tools.join(", "));
 console.log("OPENCODE ENTRYPOINT OK");

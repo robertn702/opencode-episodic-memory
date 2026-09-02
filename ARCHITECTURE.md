@@ -37,7 +37,7 @@ flowchart LR
     end
 
     subgraph Frontends["Front-ends"]
-        PLG[plugin/episodic-memory.ts<br/>episodic_search · episodic_read_context · episodic_read<br/>session.idle reindex]
+        PLG[plugin/episodic-memory.ts<br/>episodic_search · episodic_read_window · episodic_read_session<br/>session.idle reindex]
         CLI[src/cli.ts<br/>sync · search · read · stats · doctor]
     end
 
@@ -247,10 +247,10 @@ Design notes on retrieval:
   embedding input is further truncated to 2000 chars, where upstream measured
   retrieval quality peaks (the model's window is 512 tokens anyway).
 
-`episodic_read_context` first uses `getTranscriptContext` to validate a bounded
+`episodic_read_window` first uses `getTranscriptContext` to validate a bounded
 message window and its source anchor through the same privacy gate. It is
 live-source only, so deleted, private, and stale anchors fail clearly rather
-than falling back to indexed text. `episodic_read` retains its full-transcript
+than falling back to indexed text. `episodic_read_session` retains its full-transcript
 semantics: it reconstructs from the live source DB via `getTranscriptChecked`,
 falling back to indexed excerpts if the session was deleted (logging first, so
 structural drift isn't silently masked).

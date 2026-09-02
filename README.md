@@ -20,7 +20,7 @@ of the OpenCode memory-plugin landscape? See
 2. **Parse** — condensed exchanges (user text, assistant text, tool names; no reasoning blobs or tool output)
 3. **Embed** — local, offline embeddings via Transformers.js in a persistent system-Node sidecar (`Snowflake/snowflake-arctic-embed-m-v1.5` q8, 768 dims; retrieval prefix on search queries). Chosen by empirical eval on a real corpus — see [docs/embedding-model-eval.md](docs/embedding-model-eval.md)
 4. **Index** — plain SQLite at `~/.local/share/opencode-episodic-memory/index.db`; brute-force cosine over Float32 blobs, plus a built-in FTS5 BM25 index for lexical/hybrid search
-5. **Recall** — native plugin tools `episodic_search` / `episodic_read_context` / `episodic_read`, plus a `remembering-conversations` skill that teaches the agent when to search
+5. **Recall** — native plugin tools `episodic_search` / `episodic_read_window` / `episodic_read_session`, plus a `remembering-conversations` skill that teaches the agent when to search
 6. **Stay fresh** — the plugin re-indexes each session on the `session.idle` event
 
 Design note: `bun:sqlite` cannot load dynamic extensions, so sqlite-vec is not
@@ -57,7 +57,7 @@ Default sidecar-mode semantic indexing and vector/hybrid search require a system
 model (~100 MB, cached afterward). The model and its native runtime live in
 that Node sidecar, not inside OpenCode's Bun/TUI process. Explicit
 `EPISODIC_EMBED_MODE=inline` works without Node but is unsafe in affected
-OpenCode/Bun versions. `episodic_read` and lexical text search also remain
+OpenCode/Bun versions. `episodic_read_window`, `episodic_read_session`, and lexical text search also remain
 available without Node.
 
 Install the skill so the agent knows when to search, via the
@@ -106,9 +106,9 @@ of day D; `--before D` is exclusive of day D (i.e. up to the start of that day).
 
 ## Agent tools
 
-- **`episodic_search`** — `query` (+ optional `text`, `mode: vector|text|hybrid`, `after`, `before`, `limit`). `vector` (default) is semantic; `text` is lexical BM25; `hybrid` fuses both via RRF (opt-in — can surface lexical noise). Returns dated excerpts with session IDs, scores, and message anchors. Legacy results without an anchor require a normal sync before context expansion.
-- **`episodic_read_context`** — `session_id`, `anchor_message_id` (+ optional `before`, `after`, each 0-20, default 3). Reads a bounded chronological window from the privacy-gated live source transcript. Prefer `search` -> `read_context` -> `read`; deleted, private, stale, or legacy-anchored sessions cannot provide context.
-- **`episodic_read`** — `session_id` (+ optional `indexed`). Full transcript from the live store, falling back to indexed excerpts.
+- **`episodic_search`** — `query` (+ optional `text`, `mode: vector|text|hybrid`, `after`, `before`, `limit`). `vector` (default) is semantic; `text` is lexical BM25; `hybrid` fuses both via RRF (opt-in — can surface lexical noise). Returns dated excerpts with session IDs, scores, and message anchors. Legacy results without an anchor require a normal sync before bounded window reads.
+- **`episodic_read_window`** — `session_id`, `anchor_message_id` (+ optional `before`, `after`, each 0-20, default 3). Reads a bounded chronological window from the privacy-gated live source transcript. Deleted, private, stale, or legacy-anchored sessions cannot provide a window.
+- **`episodic_read_session`** — `session_id` (+ optional `indexed`). Reads the full session transcript from the live store, falling back to indexed excerpts. Prefer `episodic_search` -> `episodic_read_window` -> `episodic_read_session`, stopping once enough context has been recovered.
 
 ## Excluding conversations
 

@@ -1,5 +1,5 @@
 // OpenCode plugin: episodic memory over past conversations.
-// - Native tools: episodic_search, episodic_read_context, episodic_read
+// - Native tools: episodic_search, episodic_read_window, episodic_read_session
 // - Incremental reindex on session.idle (fire-and-forget, debounced)
 import { type Plugin, tool } from "@opencode-ai/plugin";
 import { openSource, getSession, getTranscriptChecked, getTranscriptContext } from "../src/reader";
@@ -56,7 +56,7 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
     tool: {
       episodic_search: tool({
         description:
-          "Semantic search over your PAST OpenCode conversations. Use when the user references prior work, past decisions, or previous sessions (e.g. 'how did we handle X', 'the conversation about Y', 'what did we decide about Z'). Returns dated excerpts, session IDs, and anchors. Prefer search -> episodic_read_context for a bounded live window -> episodic_read only when the full conversation is needed.",
+          "Semantic search over your PAST OpenCode conversations. Use when the user references prior work, past decisions, or previous sessions (e.g. 'how did we handle X', 'the conversation about Y', 'what did we decide about Z'). Returns dated excerpts, session IDs, and anchors. Prefer episodic_search -> episodic_read_window for a bounded live window -> episodic_read_session only when the full session is needed.",
         args: {
           query: tool.schema.string().describe("Natural-language description of what you're looking for"),
           text: tool.schema.string().optional().describe("Exact substring to require in results (ANDed with semantic ranking)"),
@@ -101,7 +101,7 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
         },
       }),
 
-      episodic_read_context: tool({
+      episodic_read_window: tool({
         description:
           "Read a bounded live-source message window around an anchor from episodic_search. Use the returned session_id and anchor_message_id; this cannot read deleted sessions or indexed-only excerpts.",
         args: {
@@ -123,9 +123,9 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
         },
       }),
 
-      episodic_read: tool({
+      episodic_read_session: tool({
         description:
-          "Read the full transcript of a past OpenCode conversation, given a session ID (from episodic_search results). Reconstructs from the live session store; falls back to indexed excerpts if the session was deleted.",
+          "Read the full transcript of a past OpenCode session, given a session ID (from episodic_search results). Use after episodic_read_window when the bounded window is insufficient. Reconstructs from the live session store; falls back to indexed excerpts if the session was deleted.",
         args: {
           session_id: tool.schema.string().describe("Session ID, e.g. ses_..."),
           indexed: tool.schema.boolean().optional().describe("Force reading from the index instead of the live session store"),
@@ -147,7 +147,7 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
             } catch (e) {
               // Log before falling through — a bare swallow would also hide
               // structural Zod drift, which is meant to be loud.
-              await log("warn", `episodic_read live-store read failed for ${args.session_id}: ${e}`);
+              await log("warn", `episodic_read_session live-store read failed for ${args.session_id}: ${e}`);
               // fall through to indexed copy
             }
           }

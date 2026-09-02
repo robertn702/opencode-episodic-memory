@@ -90,7 +90,7 @@ fit, which generalize to most of the layer-1/2 field:
 - **Summaries are lossy in the wrong direction for recall.** When you ask
   "how did we handle X?", the answer is often in phrasing the summarizer
   dropped. Indexing condensed-but-verbatim exchanges keeps the evidence;
-  `episodic_read` then pulls the full transcript from OpenCode's own DB.
+  `episodic_read_session` then pulls the full transcript from OpenCode's own DB.
 - **No always-on surface.** opencode-mem runs a web UI server; codemem runs a
   viewer and sync daemon; memsearch shells out to Python; supermemory sends
   memories to a cloud API. This plugin is a single plugin file + one SQLite
