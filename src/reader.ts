@@ -247,7 +247,7 @@ export type CheckedTranscript =
 // The single privacy-gated entry point for reading a transcript. Runs the
 // AUTHORITATIVE raw-blob exclusion check (transcriptHasMarker) BEFORE reading,
 // so the opt-out marker cannot be bypassed by a caller forgetting to check.
-// All production call sites (CLI read, plugin episodic_read, indexer) use this;
+// All production call sites (CLI read, plugin episodic_read_session, indexer) use this;
 // the raw getTranscript is module-internal.
 export function getTranscriptChecked(db: Database, sessionId: string): CheckedTranscript {
   if (transcriptHasMarker(db, sessionId)) return { excluded: true };

@@ -1,6 +1,6 @@
 ---
 name: remembering-conversations
-description: Recall past OpenCode conversations when the user references previous work, past decisions, or earlier sessions — "how did we handle X", "the conversation about Y", "what did we decide", "we tried this before", "last week we...". Use episodic_search, then episodic_read_context for a bounded window, and episodic_read only when the full transcript is needed.
+description: Recall past OpenCode conversations when the user references previous work, past decisions, or earlier sessions — "how did we handle X", "the conversation about Y", "what did we decide", "we tried this before", "last week we...". Use episodic_search, then episodic_read_window for a bounded window, and episodic_read_session only when the full session is needed.
 ---
 
 # Remembering Conversations
@@ -29,15 +29,17 @@ conversation — the index is for cross-session recall, not code search.
      (an error string, a flag name, a file path).
    - `mode: "text"` for lexical BM25 search: every query word must appear (token-based
      AND, BM25-ranked) — not phrase/adjacency or substring matching.
-2. Skim the returned excerpts (date, session title, score, and anchor). Similarity scores are
-   NOT calibrated probabilities: ≥ ~0.55 is a strong match, 0.4–0.55 is likely
-   relevant, < ~0.35 is weak or merely adjacent — judge by the snippet, not the
-   number, and say when the corpus doesn't really contain the topic.
-3. `episodic_read_context` with the result's session ID and anchor message ID to
+2. Skim the returned excerpts (date, session title, score, and anchor). Vector
+   similarity scores are NOT calibrated probabilities: ≥ ~0.55 is a strong
+   match, 0.4–0.55 is likely relevant, and < ~0.35 is weak or merely adjacent.
+   These thresholds apply only to vector results. For hybrid results, use the
+   snippet and the `rrf` label instead; RRF scores are on a different scale.
+   Say when the corpus doesn't really contain the topic.
+3. `episodic_read_window` with the result's session ID and anchor message ID to
    inspect a small chronological window first. It is live-source only: private,
    deleted, stale, and legacy unanchored results cannot expand.
-4. `episodic_read` with the session ID only when that context isn't enough and
-   the full transcript is needed.
+4. `episodic_read_session` with the session ID only when that window isn't enough
+   and the full session transcript is needed.
 
 ## Answering
 

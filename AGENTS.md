@@ -51,7 +51,7 @@ Semantic search over past OpenCode conversations via native plugin tools.
   crash or corrupt search. Both bugs were found during the bge→snowflake
   migration (12 orphaned 384-dim chunks crashed a 768-dim query).
 - Chunks persist the nullable source-user `anchor_message_id` for progressive
-  disclosure: search renders it, then `episodic_read_context` reads a bounded
+  disclosure: search renders it, then `episodic_read_window` reads a bounded
   (0-20 messages each side) live-source window. The anchor migration uses only
   `ALTER TABLE ... ADD COLUMN`, marks existing sessions stale for normal sync,
   and must never rebuild `chunks` or disturb its implicit rowids/FTS mapping.
@@ -123,7 +123,7 @@ Semantic search over past OpenCode conversations via native plugin tools.
   **`getTranscriptChecked()`** or the snapshot-gated
   **`getTranscriptContext()`** (reader.ts); both run that raw check BEFORE
   materializing anything and return privacy-safe results — so indexing
-  (indexer.ts), `episodic_read_context`, `episodic_read`, and CLI `read` cannot bypass the gate by
+  (indexer.ts), `episodic_read_window`, `episodic_read_session`, and CLI `read` cannot bypass the gate by
   forgetting a manual check. The raw `getTranscript` is module-internal (not
   exported); `transcriptHasMarker` stays exported as the authoritative
   primitive (directly tested in reader.test.ts). `hasExcludeMarker()` in

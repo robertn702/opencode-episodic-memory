@@ -74,7 +74,7 @@ export function parseTranscript(messages: SourceMessage[]): {
   return { exchanges: exchanges.filter((e) => e.user || e.assistant), excluded: false };
 }
 
-// Text stored per chunk (also displayed by episodic_read). Capped at 4000 chars
+// Text stored per chunk (also displayed by episodic_read_session). Capped at 4000 chars
 // to keep storage sane; the embedding step (embed.ts) further truncates to 2000
 // chars where retrieval quality peaks. The head of an exchange carries the
 // most signal.

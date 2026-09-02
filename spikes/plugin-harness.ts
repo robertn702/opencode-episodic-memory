@@ -107,6 +107,11 @@ if (!hooks.tool) throw new Error("plugin registered no tools");
 if (!hooks.event) throw new Error("plugin registered no event hook");
 const tools = hooks.tool;
 console.log("tools:", Object.keys(hooks.tool));
+const expectedToolNames = ["episodic_read_session", "episodic_read_window", "episodic_search"];
+const actualToolNames = Object.keys(tools).sort();
+if (actualToolNames.join(",") !== expectedToolNames.join(",")) {
+  throw new Error(`harness error: unexpected public tools (got: ${actualToolNames.join(", ") || "none"})`);
+}
 
 // A minimal but complete ToolContext for invoking tools directly.
 const ctx: ToolContext = {
@@ -157,40 +162,40 @@ if (!result.includes("anchor: msg_user")) {
 console.log("=== episodic_search ===");
 console.log(result.slice(0, 900));
 
-// 3. episodic_read_context (search-result anchor -> bounded live window)
-const context = await tools.episodic_read_context.execute(
+// 3. episodic_read_window (search-result anchor -> bounded live window)
+const context = await tools.episodic_read_window.execute(
   { session_id: target.id, anchor_message_id: "msg_user", before: 1, after: 1 },
   ctx
 );
 if (typeof context !== "string" || !context.includes("... [truncated]") || !context.includes("msg_before") || !context.includes("msg_user") || !context.includes("(anchor)") || !context.includes("local embeddings")) {
-  throw new Error("harness error: episodic_read_context did not return the anchored fixture window");
+  throw new Error("harness error: episodic_read_window did not return the anchored fixture window");
 }
-console.log("=== episodic_read_context ===");
+console.log("=== episodic_read_window ===");
 console.log(context.slice(0, 400));
 
-async function expectContextError(args: { session_id: string; anchor_message_id: string; before?: number; after?: number }, text: string): Promise<void> {
+async function expectWindowError(args: { session_id: string; anchor_message_id: string; before?: number; after?: number }, text: string): Promise<void> {
   try {
-    await tools.episodic_read_context.execute(args, ctx);
+    await tools.episodic_read_window.execute(args, ctx);
   } catch (error) {
     if (error instanceof Error && error.message.includes(text)) return;
     throw error;
   }
-  throw new Error(`harness error: expected episodic_read_context error containing ${text}`);
+  throw new Error(`harness error: expected episodic_read_window error containing ${text}`);
 }
 
-await expectContextError({ session_id: "missing", anchor_message_id: "msg_user" }, "No live conversation");
-await expectContextError({ session_id: target.id, anchor_message_id: "stale" }, "stale or invalid");
-await expectContextError({ session_id: target.id, anchor_message_id: "msg_user", before: -1 }, "non-negative integers");
+await expectWindowError({ session_id: "missing", anchor_message_id: "msg_user" }, "No live conversation");
+await expectWindowError({ session_id: target.id, anchor_message_id: "stale" }, "stale or invalid");
+await expectWindowError({ session_id: target.id, anchor_message_id: "msg_user", before: -1 }, "non-negative integers");
 
-// 4. episodic_read (indexed fallback path, no live DB dependency)
-const out = await tools.episodic_read.execute(
+// 4. episodic_read_session (indexed fallback path, no live DB dependency)
+const out = await tools.episodic_read_session.execute(
   { session_id: target.id, indexed: true },
   ctx
 );
 if (typeof out !== "string" || !out.includes("How should episodic memory architecture work?") || !out.includes("local embeddings")) {
-  throw new Error("harness error: episodic_read did not return the indexed fixture transcript");
+  throw new Error("harness error: episodic_read_session did not return the indexed fixture transcript");
 }
-console.log("=== episodic_read (indexed) ===");
+console.log("=== episodic_read_session (indexed) ===");
 console.log(out.slice(0, 400));
 
 const privateFixture = new Database(sourcePath);
@@ -198,7 +203,7 @@ privateFixture.run("INSERT INTO part (id, message_id, session_id, time_created, 
   "part_private", "msg_user", sessionId, created + 2, JSON.stringify({ type: "text", text: "DO NOT INDEX THIS CHAT" }),
 ]);
 privateFixture.close();
-await expectContextError({ session_id: target.id, anchor_message_id: "msg_user" }, "private");
+await expectWindowError({ session_id: target.id, anchor_message_id: "msg_user" }, "private");
 
 console.log("\nPlugin harness OK.");
 process.exit(0);
