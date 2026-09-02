@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { listSessions, getSession, getTranscriptChecked, transcriptHasMarker, EXCLUDE_MARKER, type SourceMessage } from "./reader";
+import { listSessions, getSession, getTranscriptChecked, getTranscriptContext, transcriptHasMarker, EXCLUDE_MARKER, type SourceMessage } from "./reader";
 
 // getTranscript is module-internal now; exercise its blob-degradation behavior
 // through the privacy-gated accessor. These fixtures carry no exclusion marker,
@@ -207,5 +207,118 @@ describe("transcriptHasMarker (raw blob scan)", () => {
     addPart(db, "p1", "m1", "ses_a", 1, `{"type":"text","text":"do not index this chat"}`);
     addPart(db, "p2", "m1", "ses_a", 2, `{"type":"text","text":"DO NOT INDEX THIS"}`);
     expect(transcriptHasMarker(db, "ses_a")).toBe(false);
+  });
+});
+
+describe("getTranscriptContext", () => {
+  function seedContext(db: Database, id = "ses_context"): void {
+    addSession(db, { id });
+    for (let i = 0; i < 5; i++) {
+      const messageId = `msg_${i}`;
+      addMessage(db, messageId, id, i, JSON.stringify({ role: i % 2 === 0 ? "user" : "assistant" }));
+      addPart(db, `part_${i}`, messageId, id, i, JSON.stringify({ type: "text", text: `message ${i}` }));
+    }
+    addPart(db, "tool_3", "msg_3", id, 3, JSON.stringify({ type: "tool", tool: "read" }));
+  }
+
+  test("expands a chronological window around the anchored message", () => {
+    const db = makeSource();
+    seedContext(db);
+    const context = getTranscriptContext(db, "ses_context", "msg_2", 1, 2);
+    expect(context).toMatchObject({ ok: true, anchorIndex: 2, sliceStart: 1, total: 5 });
+    if (!context.ok) throw new Error("expected context");
+    expect(context.messages.map((message) => message.id)).toEqual(["msg_1", "msg_2", "msg_3", "msg_4"]);
+    expect(context.messages[2].parts).toContainEqual({ type: "tool", tool: "read" });
+  });
+
+  test("orders tied timestamps by message ID when locating the anchor", () => {
+    const db = makeSource();
+    addSession(db, { id: "ses_tied" });
+    for (const id of ["msg_c", "msg_a", "msg_b"]) {
+      addMessage(db, id, "ses_tied", 10, JSON.stringify({ role: "user" }));
+      addPart(db, `part_${id}`, id, "ses_tied", 10, JSON.stringify({ type: "text", text: id }));
+    }
+    const context = getTranscriptContext(db, "ses_tied", "msg_b", 1, 1);
+    if (!context.ok) throw new Error("expected context");
+    expect(context).toMatchObject({ anchorIndex: 1, sliceStart: 0, total: 3 });
+    expect(context.messages.map((message) => message.id)).toEqual(["msg_a", "msg_b", "msg_c"]);
+  });
+
+  test("clamps windows at the beginning and end while retaining the anchor", () => {
+    const db = makeSource();
+    seedContext(db);
+    const start = getTranscriptContext(db, "ses_context", "msg_0", 3, 1);
+    const end = getTranscriptContext(db, "ses_context", "msg_4", 1, 3);
+    if (!start.ok || !end.ok) throw new Error("expected contexts");
+    expect(start.sliceStart).toBe(0);
+    expect(start.messages.map((message) => message.id)).toEqual(["msg_0", "msg_1"]);
+    expect(end.sliceStart).toBe(3);
+    expect(end.messages.map((message) => message.id)).toEqual(["msg_3", "msg_4"]);
+  });
+
+  test("accepts the maximum bound and supports an anchor-only window", () => {
+    const db = makeSource();
+    seedContext(db);
+    const maximum = getTranscriptContext(db, "ses_context", "msg_2", 20, 20);
+    const anchorOnly = getTranscriptContext(db, "ses_context", "msg_2", 0, 0);
+    if (!maximum.ok || !anchorOnly.ok) throw new Error("expected contexts");
+    expect(maximum.messages.map((message) => message.id)).toEqual(["msg_0", "msg_1", "msg_2", "msg_3", "msg_4"]);
+    expect(anchorOnly.sliceStart).toBe(2);
+    expect(anchorOnly.messages.map((message) => message.id)).toEqual(["msg_2"]);
+  });
+
+  test("only parses structural rows in the selected context window", () => {
+    const db = makeSource();
+    seedContext(db);
+    db.run("UPDATE message SET data = NULL WHERE id = 'msg_0'");
+    const outsideMalformed = getTranscriptContext(db, "ses_context", "msg_4", 0, 0);
+    if (!outsideMalformed.ok) throw new Error("expected context");
+    expect(outsideMalformed.messages.map((message) => message.id)).toEqual(["msg_4"]);
+
+    db.run("UPDATE message SET data = NULL WHERE id = 'msg_4'");
+    expect(() => getTranscriptContext(db, "ses_context", "msg_4", 0, 0)).toThrow();
+  });
+
+  test("bounds selected parts and ignores malformed parts outside the window", () => {
+    const db = makeSource();
+    seedContext(db);
+    addPart(db, "huge", "msg_2", "ses_context", 10, JSON.stringify({ type: "text", text: "x".repeat(20_000) }));
+    const huge = getTranscriptContext(db, "ses_context", "msg_2", 0, 0);
+    if (!huge.ok) throw new Error("expected context");
+    expect(huge.messages[0].parts).toEqual([{ type: "text", text: "message 2" }]);
+    expect(huge.messages[0].contextPartsOmitted).toBe(1);
+
+    db.run("UPDATE part SET data = NULL WHERE id = 'part_0'");
+    const outsideMalformed = getTranscriptContext(db, "ses_context", "msg_4", 0, 0);
+    if (!outsideMalformed.ok) throw new Error("expected context");
+    expect(outsideMalformed.messages.map((message) => message.id)).toEqual(["msg_4"]);
+    db.run("UPDATE part SET data = NULL WHERE id = 'part_4'");
+    expect(() => getTranscriptContext(db, "ses_context", "msg_4", 0, 0)).toThrow();
+  });
+
+  test("caps retained parts per selected message and reports omissions", () => {
+    const db = makeSource();
+    seedContext(db);
+    for (let i = 0; i < 25; i++) {
+      addPart(db, `extra_${i}`, "msg_2", "ses_context", 10 + i, JSON.stringify({ type: "tool", tool: `tool_${i}` }));
+    }
+    const context = getTranscriptContext(db, "ses_context", "msg_2", 0, 0);
+    if (!context.ok) throw new Error("expected context");
+    expect(context.messages[0].parts).toHaveLength(20);
+    expect(context.messages[0].contextPartsOmitted).toBe(6);
+  });
+
+  test("distinguishes invalid bounds, unknown sessions, stale anchors, and private sessions", () => {
+    const db = makeSource();
+    seedContext(db);
+    expect(getTranscriptContext(db, "ses_context", "msg_2", -1, 0)).toEqual({ ok: false, reason: "invalid_bounds" });
+    expect(getTranscriptContext(db, "ses_context", "msg_2", 21, 0)).toEqual({ ok: false, reason: "invalid_bounds" });
+    expect(getTranscriptContext(db, "ses_context", "msg_2", 1.5, 0)).toEqual({ ok: false, reason: "invalid_bounds" });
+    expect(getTranscriptContext(db, "missing", "msg_2")).toEqual({ ok: false, reason: "unknown_session" });
+    expect(getTranscriptContext(db, "ses_context", "stale")).toEqual({ ok: false, reason: "invalid_anchor" });
+    addPart(db, "private_part", "msg_0", "ses_context", 6, JSON.stringify({ type: "text", text: EXCLUDE_MARKER }));
+    // The marker is outside the requested anchor-only window; the privacy gate
+    // remains session-wide rather than depending on the selected message rows.
+    expect(getTranscriptContext(db, "ses_context", "msg_4", 0, 0)).toEqual({ ok: false, reason: "excluded" });
   });
 });

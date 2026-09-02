@@ -16,7 +16,7 @@ Semantic search over past OpenCode conversations via native plugin tools.
 - `src/store.ts` — index SQLite DB; brute-force cosine vector search (**the**
   swap point if an ANN index is ever needed) + FTS5 BM25 lexical search, fused
   on demand via reciprocal rank fusion. Two-phase: score candidates on
-  embeddings/BM25 only, hydrate text/title/directory for the top-K winners.
+  embeddings/BM25 only, hydrate text/title/directory/source anchor for the top-K winners.
 - `src/indexer.ts` — incremental sync, watermark = `session.time_updated`
 - `src/cli.ts` — `bun run src/cli.ts sync|search|read|stats|doctor`
 - `plugin/episodic-memory.ts` — OpenCode plugin (tools + `session.idle` reindex)
@@ -50,6 +50,11 @@ Semantic search over past OpenCode conversations via native plugin tools.
   skips embedding rows whose byteLength ≠ dims×4 — a mixed-model index can never
   crash or corrupt search. Both bugs were found during the bge→snowflake
   migration (12 orphaned 384-dim chunks crashed a 768-dim query).
+- Chunks persist the nullable source-user `anchor_message_id` for progressive
+  disclosure: search renders it, then `episodic_read_context` reads a bounded
+  (0-20 messages each side) live-source window. The anchor migration uses only
+  `ALTER TABLE ... ADD COLUMN`, marks existing sessions stale for normal sync,
+  and must never rebuild `chunks` or disturb its implicit rowids/FTS mapping.
 - **`bun:sqlite` does not support dynamic extension loading** — sqlite-vec cannot
   work inside OpenCode plugins. Hence brute-force cosine over Float32 blobs.
   FTS5, by contrast, is **compiled into** bun:sqlite (a static module, not a
@@ -114,11 +119,11 @@ Semantic search over past OpenCode conversations via native plugin tools.
   `transcriptHasMarker()` in reader.ts, which substring-matches the RAW `data`
   column (`instr`, exact case) with no JSON parsing — the marker must not
   depend on blob parseability, since the blob pipeline degrades unparseable
-  parts to `text: undefined`. All production reads go through
-  **`getTranscriptChecked()`** (reader.ts), which runs that raw check BEFORE
-  materializing anything and returns a discriminated
-  `{ excluded: true } | { excluded: false; messages }` union — so indexing
-  (indexer.ts), `episodic_read`, and CLI `read` cannot bypass the gate by
+  parts to `text: undefined`. Production reads use either
+  **`getTranscriptChecked()`** or the snapshot-gated
+  **`getTranscriptContext()`** (reader.ts); both run that raw check BEFORE
+  materializing anything and return privacy-safe results — so indexing
+  (indexer.ts), `episodic_read_context`, `episodic_read`, and CLI `read` cannot bypass the gate by
   forgetting a manual check. The raw `getTranscript` is module-internal (not
   exported); `transcriptHasMarker` stays exported as the authoritative
   primitive (directly tested in reader.test.ts). `hasExcludeMarker()` in

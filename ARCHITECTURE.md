@@ -37,7 +37,7 @@ flowchart LR
     end
 
     subgraph Frontends["Front-ends"]
-        PLG[plugin/episodic-memory.ts<br/>episodic_search · episodic_read<br/>session.idle reindex]
+        PLG[plugin/episodic-memory.ts<br/>episodic_search · episodic_read_context · episodic_read<br/>session.idle reindex]
         CLI[src/cli.ts<br/>sync · search · read · stats · doctor]
     end
 
@@ -64,14 +64,14 @@ transcript rendering, hit formatting — so the CLI and plugin can't drift apart
 
 | Module | Role | Key exports |
 |---|---|---|
-| `src/reader.ts` | Read-only access to `opencode.db`. Zod validation; **authoritative privacy gate** | `listSessions`, `getSession`, `getTranscriptChecked`, `transcriptHasMarker`, `EXCLUDE_MARKER` |
+| `src/reader.ts` | Read-only access to `opencode.db`. Zod validation; **authoritative privacy gate** | `listSessions`, `getSession`, `getTranscriptChecked`, `getTranscriptContext`, `transcriptHasMarker`, `EXCLUDE_MARKER` |
 | `src/parser.ts` | Transcript → condensed `Exchange[]` (user text, assistant text, tool names) | `parseTranscript`, `exchangeText`, `hasExcludeMarker` (fast path) |
 | `src/embed.ts` | Embedding API + Node-sidecar client. Prepares text, manages one lazy child, and validates protocol vectors without importing Transformers.js | `embed` (docs), `embedQuery` (adds retrieval prefix), `QUERY_PREFIX`, `MAX_CHARS` |
 | `src/embed-sidecar.mjs` | Plain Node ESM NDJSON server; dynamically imports Transformers.js and holds the warm pipeline | protocol `{id,texts}` -> `{id,vectors}` / `{id,error}` |
 | `src/embed-inline.ts` | Explicit lazy inline fallback for exceptional hosts | `embedInline` |
 | `src/store.ts` | Index SQLite schema + all retrieval (vector / BM25 / hybrid RRF) | `openIndex`, `replaceSessionChunks`, `search`, `textSearch`, `stats` |
 | `src/indexer.ts` | Incremental, idempotent sync; watermark-based; orphan pruning | `syncSession`, `syncAll`, `pruneOrphans` |
-| `src/format.ts` | Shared presentation for CLI + plugin | `parseDateArg`, `renderTranscript`, `formatHits` |
+| `src/format.ts` | Shared presentation for CLI + plugin | `parseDateArg`, `renderTranscript`, `renderTranscriptContext`, `formatHits` |
 | `src/cli.ts` | `opencode-episodic` binary: sync / search / read / stats / doctor | — |
 | `plugin/episodic-memory.ts` | OpenCode plugin: tools + `session.idle` reindex (debounced, fire-and-forget) | `EpisodicMemory` |
 | `skills/remembering-conversations/` | Skill teaching the agent when to invoke the tools | — |
@@ -107,7 +107,7 @@ sessions (id PK, project_id, parent_id, title, directory,
           time_created, source_time_updated, indexed_at,
           status)            -- 'indexed' | 'excluded' | 'empty'
 
-chunks   (session_id, seq, time_created, text, embedding BLOB,
+chunks   (session_id, seq, time_created, anchor_message_id NULL, text, embedding BLOB,
           PRIMARY KEY (session_id, seq))
          + chunks_time_idx on (time_created)
 
@@ -127,6 +127,11 @@ chunks_fts  FTS5 virtual table, external content over chunks.text,
   excluded/empty sessions. A changed session is always re-read and re-checked
   against the marker, so removing the marker from a conversation gets it
   indexed on the next sync.
+- `anchor_message_id` is the source user-message ID that began an exchange. It
+  lets a search hit expand into a small live-source transcript window without
+  loading the full conversation. Migration adds this nullable column in place
+  and marks existing sessions stale for normal reindexing; it never rebuilds
+  `chunks` or changes its implicit rowids.
 
 > **Never VACUUM `index.db`.** The FTS5 external-content mapping rides
 > `chunks`' implicit rowid (the PK is `(session_id, seq)`, no explicit
@@ -190,12 +195,12 @@ Key properties:
   touches changed sessions (`--force` bypasses).
 - **Privacy-first**: the exclusion gate (`DO NOT INDEX THIS CHAT`) runs as a
   raw `instr()` substring scan over the unparsed `data` column *before* any
-  transcript is materialized, inside `getTranscriptChecked()` — the single
-  entry point all production reads go through (indexer, CLI `read`, plugin
-  `episodic_read`). The raw `getTranscript` is module-internal, so no caller
-  can bypass the gate by forgetting a check. The parser's `hasExcludeMarker()`
-  is a cheaper parsed-text fast path only — it can miss the marker in
-  unparseable blobs, which is exactly why the raw check is authoritative.
+  transcript is materialized. Full reads use `getTranscriptChecked()`;
+  bounded reads use snapshot-gated `getTranscriptContext()`. The raw
+  `getTranscript` is module-internal, so no caller can bypass the gate by
+  forgetting a check. The parser's `hasExcludeMarker()` is a cheaper
+  parsed-text fast path only — it can miss the marker in unparseable blobs,
+  which is exactly why the raw check is authoritative.
 - **Self-healing**: orphan pruning removes index rows for sessions deleted
   from the source; search skips embedding rows whose byteLength ≠ dims×4, so a
   mixed-model index (e.g. mid-migration) can never crash or corrupt results.
@@ -218,7 +223,7 @@ flowchart TB
         RRF --> H
     end
 
-    H["hydrate<br/>fetch text/title/directory<br/>for top-K winners only"] --> FMT["format.ts<br/>markdown hits, snippet capped,<br/>score label: cosine vs rrf"]
+    H["hydrate<br/>fetch text/title/directory/anchor<br/>for top-K winners only"] --> FMT["format.ts<br/>markdown hits, snippet capped,<br/>score label: cosine vs rrf"]
     FMT --> OUT[CLI stdout / agent tool result]
 ```
 
@@ -242,10 +247,13 @@ Design notes on retrieval:
   embedding input is further truncated to 2000 chars, where upstream measured
   retrieval quality peaks (the model's window is 512 tokens anyway).
 
-`episodic_read` mirrors the same privacy gate: it reconstructs the transcript
-from the live source DB via `getTranscriptChecked`, falling back to indexed
-excerpts if the session was deleted (logging first, so structural drift isn't
-silently masked).
+`episodic_read_context` first uses `getTranscriptContext` to validate a bounded
+message window and its source anchor through the same privacy gate. It is
+live-source only, so deleted, private, and stale anchors fail clearly rather
+than falling back to indexed text. `episodic_read` retains its full-transcript
+semantics: it reconstructs from the live source DB via `getTranscriptChecked`,
+falling back to indexed excerpts if the session was deleted (logging first, so
+structural drift isn't silently masked).
 
 ## Key design decisions
 
@@ -254,7 +262,7 @@ silently masked).
 | Brute-force cosine, not sqlite-vec | `bun:sqlite` can't load dynamic extensions; brute force is single-digit ms at this scale. `store.ts` is **the** swap point if an ANN index is ever needed. |
 | FTS5 external-content table + triggers | FTS5 is compiled into `bun:sqlite` (static module, not an extension). Triggers keep the index correct for *any* write path, not just `replaceSessionChunks`. |
 | Hybrid off by default | BM25 matches injected boilerplate on this corpus; RRF then ranks noise above real hits. Opt-in via `hybrid: true` / `--hybrid` / `mode: "hybrid"`. |
-| Privacy gate on raw blobs, single entry point | The opt-out marker must not depend on JSON parseability; funneling all reads through `getTranscriptChecked` makes bypass impossible by omission. |
+| Privacy gate on raw blobs, gated read entry points | The opt-out marker must not depend on JSON parseability; full and bounded reads each enforce the same raw gate before materialization. |
 | Zod on source reads only | Structural rows throw (fail-loud on OpenCode schema drift); JSON blobs degrade per-row. The index DB uses typed `prepare<T>()` casts — we own that schema end to end. No `as` assertions elsewhere. |
 | Watermark incremental sync + orphan pruning | Cheap re-indexes; deleted conversations don't linger with stale embeddings. |
 | Shared `format.ts` | CLI and plugin stay thin and can't drift apart in output formatting or date handling. |

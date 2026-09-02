@@ -21,6 +21,7 @@ describe("parseTranscript", () => {
     ]);
     expect(excluded).toBe(false);
     expect(exchanges).toHaveLength(2);
+    expect(exchanges[0].anchorMessageId).toBe("user-2");
     expect(exchanges[0].user).toBe("how do I fix the redirect?");
     expect(exchanges[0].assistant).toBe("Change the callback URL.");
     expect(exchanges[0].tools).toEqual(["edit", "bash"]);
@@ -49,7 +50,7 @@ describe("parseTranscript", () => {
 describe("exchangeText", () => {
   test("includes date, title, participants, deduped tools", () => {
     const text = exchangeText("My session", "2026-07-22", {
-      user: "q", assistant: "a", tools: ["bash", "bash", "edit"], time: 0,
+      anchorMessageId: "msg_user", user: "q", assistant: "a", tools: ["bash", "bash", "edit"], time: 0,
     });
     expect(text).toStartWith("2026-07-22 — My session\nUser: q\nAssistant: a");
     expect(text).toContain("Tools used: bash, edit");
@@ -57,7 +58,7 @@ describe("exchangeText", () => {
 
   test("caps at 4000 chars", () => {
     const text = exchangeText("t", "2026-07-22", {
-      user: "x".repeat(10000), assistant: "", tools: [], time: 0,
+      anchorMessageId: "msg_user", user: "x".repeat(10000), assistant: "", tools: [], time: 0,
     });
     expect(text.length).toBe(4000);
   });

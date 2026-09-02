@@ -42,11 +42,20 @@ const MessageRowSchema = z.object({
   time_created: z.number(),
   data: z.string(),
 });
+type SourceMessageRow = z.infer<typeof MessageRowSchema>;
+
+const AnchorRowSchema = z.object({
+  id: z.string(),
+  time_created: z.number(),
+});
 
 const PartRowSchema = z.object({
   message_id: z.string(),
   data: z.string(),
 });
+type SourcePartRow = z.infer<typeof PartRowSchema>;
+
+const PartCountSchema = z.object({ message_id: z.string(), n: z.number() });
 
 // Aggregate row for the raw marker scan (structural: throw on drift).
 const MarkerCountSchema = z.object({ n: z.number() });
@@ -70,7 +79,11 @@ export interface SourceMessage {
   role: string;
   timeCreated: number;
   parts: SourcePart[];
+  contextPartsOmitted?: number;
 }
+
+const MAX_CONTEXT_PART_BYTES = 8_192;
+const MAX_CONTEXT_PARTS_PER_MESSAGE = 20;
 
 export function openSource(path: string = sourceDbPath()): Database {
   return new Database(path, { readonly: true });
@@ -140,30 +153,90 @@ function getTranscript(db: Database, sessionId: string): SourceMessage[] {
       )
       .all(sessionId)
   );
+  return materializeMessages(db, sessionId, messages);
+}
 
-  const parts = PartRowSchema.array().parse(
-    db
-      .prepare(
-        `SELECT message_id, data FROM part
-         WHERE session_id = ? ORDER BY time_created, id`
-      )
-      .all(sessionId)
-  );
+// Parse parts only for the supplied message rows. Full transcript reads pass
+// every row; bounded context reads pass just their selected SQL window.
+function materializeMessages(
+  db: Database,
+  sessionId: string,
+  messages: SourceMessageRow[],
+  contextLimits?: { maxPartBytes: number; maxPartsPerMessage: number }
+): SourceMessage[] {
+  if (messages.length === 0) return [];
+  const ids = messages.map((message) => message.id);
+  const placeholders = ids.map(() => "?").join(", ");
+  const materialized = contextLimits
+    ? boundedParts(db, sessionId, ids, placeholders, contextLimits)
+    : {
+      rows: PartRowSchema.array().parse(
+        db
+          .prepare(
+            `SELECT message_id, data FROM part
+             WHERE session_id = ? AND message_id IN (${placeholders}) ORDER BY time_created, id`
+          )
+          .all(sessionId, ...ids)
+      ),
+      omittedByMessage: new Map<string, number>(),
+    };
 
   const partsByMsg = new Map<string, SourcePart[]>();
-  for (const p of parts) {
+  for (const p of materialized.rows) {
     const d = PartDataSchema.parse(safeJsonParse(p.data));
     let list = partsByMsg.get(p.message_id);
     if (!list) partsByMsg.set(p.message_id, (list = []));
     list.push(d);
   }
 
-  return messages.map((m) => ({
-    id: m.id,
-    role: MessageDataSchema.parse(safeJsonParse(m.data)).role,
-    timeCreated: m.time_created,
-    parts: partsByMsg.get(m.id) ?? [],
-  }));
+  return messages.map((m) => {
+    const omitted = materialized.omittedByMessage.get(m.id) ?? 0;
+    return {
+      id: m.id,
+      role: MessageDataSchema.parse(safeJsonParse(m.data)).role,
+      timeCreated: m.time_created,
+      parts: partsByMsg.get(m.id) ?? [],
+      ...(omitted > 0 ? { contextPartsOmitted: omitted } : {}),
+    };
+  });
+}
+
+// Context-only part fetch: SQL excludes oversized raw blobs before they cross
+// into JS, ranks remaining parts per selected message, and records omissions.
+// Full transcript reads continue through the unbounded path above.
+function boundedParts(
+  db: Database,
+  sessionId: string,
+  ids: string[],
+  placeholders: string,
+  limits: { maxPartBytes: number; maxPartsPerMessage: number }
+): { rows: SourcePartRow[]; omittedByMessage: Map<string, number> } {
+  const counts = PartCountSchema.array().parse(
+    db.prepare(
+      `SELECT message_id, COUNT(*) AS n FROM part
+       WHERE session_id = ? AND message_id IN (${placeholders}) GROUP BY message_id`
+    ).all(sessionId, ...ids)
+  );
+  const rows = PartRowSchema.array().parse(
+    db.prepare(
+      `WITH ranked AS (
+         SELECT message_id, data, time_created, id,
+                ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY time_created, id) AS part_rank
+         FROM part
+         WHERE session_id = ? AND message_id IN (${placeholders})
+           AND (data IS NULL OR length(CAST(data AS BLOB)) <= ?)
+       )
+       SELECT message_id, data FROM ranked WHERE part_rank <= ? ORDER BY time_created, id`
+    ).all(sessionId, ...ids, limits.maxPartBytes, limits.maxPartsPerMessage)
+  );
+  const retained = new Map<string, number>();
+  for (const row of rows) retained.set(row.message_id, (retained.get(row.message_id) ?? 0) + 1);
+  const omittedByMessage = new Map<string, number>();
+  for (const count of counts) {
+    const omitted = count.n - (retained.get(count.message_id) ?? 0);
+    if (omitted > 0) omittedByMessage.set(count.message_id, omitted);
+  }
+  return { rows, omittedByMessage };
 }
 
 // Discriminated result: excluded conversations never yield a transcript.
@@ -179,4 +252,83 @@ export type CheckedTranscript =
 export function getTranscriptChecked(db: Database, sessionId: string): CheckedTranscript {
   if (transcriptHasMarker(db, sessionId)) return { excluded: true };
   return { excluded: false, messages: getTranscript(db, sessionId) };
+}
+
+export const MAX_CONTEXT_MESSAGES = 20;
+
+export type TranscriptContext =
+  | { ok: true; session: SourceSession; messages: SourceMessage[]; anchorIndex: number; sliceStart: number; total: number }
+  | { ok: false; reason: "unknown_session" | "excluded" | "invalid_anchor" | "invalid_bounds" };
+
+// Read a small, chronological live-source window around an indexed user-message
+// anchor. This deliberately has no indexed fallback: an index may outlive its
+// source transcript, but it cannot safely reconstruct source message context.
+export function getTranscriptContext(
+  db: Database,
+  sessionId: string,
+  anchorMessageId: string,
+  before: number = 3,
+  after: number = 3
+): TranscriptContext {
+  if (!isContextBound(before) || !isContextBound(after)) return { ok: false, reason: "invalid_bounds" };
+  return readSnapshot(db, () => {
+    // Keep the whole-session raw scan first: privacy is session-wide, while
+    // every subsequent query stays bounded to the requested context window.
+    if (transcriptHasMarker(db, sessionId)) return { ok: false, reason: "excluded" };
+    const session = getSession(db, sessionId);
+    if (!session) return { ok: false, reason: "unknown_session" };
+    const anchorRow = db.prepare("SELECT id, time_created FROM message WHERE session_id = ? AND id = ?").get(sessionId, anchorMessageId);
+    if (anchorRow === null || anchorRow === undefined) return { ok: false, reason: "invalid_anchor" };
+    const anchor = AnchorRowSchema.parse(anchorRow);
+    const total = MarkerCountSchema.parse(
+      db.prepare("SELECT COUNT(*) AS n FROM message WHERE session_id = ?").get(sessionId)
+    ).n;
+    const anchorIndex = MarkerCountSchema.parse(
+      db.prepare(
+        `SELECT COUNT(*) AS n FROM message
+         WHERE session_id = ? AND (time_created < ? OR (time_created = ? AND id < ?))`
+      ).get(sessionId, anchor.time_created, anchor.time_created, anchor.id)
+    ).n;
+    const sliceStart = Math.max(0, anchorIndex - before);
+    const sliceEnd = Math.min(total, anchorIndex + after + 1);
+    const sliceLength = sliceEnd - sliceStart;
+    const rows = MessageRowSchema.array().parse(
+      db.prepare(
+        `SELECT id, time_created, data FROM message
+         WHERE session_id = ? ORDER BY time_created, id LIMIT ? OFFSET ?`
+      ).all(sessionId, sliceLength, sliceStart)
+    );
+    return {
+      ok: true,
+      session,
+      messages: materializeMessages(db, sessionId, rows, {
+        maxPartBytes: MAX_CONTEXT_PART_BYTES,
+        maxPartsPerMessage: MAX_CONTEXT_PARTS_PER_MESSAGE,
+      }),
+      anchorIndex,
+      sliceStart,
+      total,
+    };
+  });
+}
+
+// BEGIN is deferred, so this remains a read transaction against the readonly
+// source DB while pinning all context queries to one SQLite snapshot.
+function readSnapshot<T>(db: Database, read: () => T): T {
+  let active = false;
+  try {
+    db.run("BEGIN");
+    active = true;
+    const result = read();
+    db.run("COMMIT");
+    active = false;
+    return result;
+  } catch (error) {
+    if (active) db.run("ROLLBACK");
+    throw error;
+  }
+}
+
+function isContextBound(value: number): boolean {
+  return Number.isInteger(value) && value >= 0 && value <= MAX_CONTEXT_MESSAGES;
 }

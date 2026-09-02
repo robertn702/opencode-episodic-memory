@@ -23,6 +23,7 @@ export function hasExcludeMarker(messages: SourceMessage[]): boolean {
 }
 
 export interface Exchange {
+  anchorMessageId: string;
   user: string;
   assistant: string;
   tools: string[];
@@ -60,7 +61,7 @@ export function parseTranscript(messages: SourceMessage[]): {
     if (m.role === "user") {
       const text = textOf(m.parts);
       if (!text) continue; // e.g. pure tool-result turns
-      current = { user: text, assistant: "", tools: [], time: m.timeCreated };
+      current = { anchorMessageId: m.id, user: text, assistant: "", tools: [], time: m.timeCreated };
       exchanges.push(current);
     } else if (m.role === "assistant" && current) {
       const text = textOf(m.parts);

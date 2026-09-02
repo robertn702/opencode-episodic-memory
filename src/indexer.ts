@@ -52,7 +52,9 @@ export async function syncSession(
   replaceSessionChunks(
     index,
     meta,
-    exchanges.map((e, i) => ({ seq: i, time_created: e.time, text: texts[i], embedding: vectors[i] }))
+    exchanges.map((e, i) => ({
+      seq: i, time_created: e.time, text: texts[i], embedding: vectors[i], anchor_message_id: e.anchorMessageId,
+    }))
   );
   return "indexed";
 }
