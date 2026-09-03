@@ -2,7 +2,7 @@
 // exercise the event hook and all tools.
 // Uses throwaway source and index DBs in /tmp so live data is never touched.
 import { Database } from "bun:sqlite";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -125,28 +125,45 @@ const ctx: ToolContext = {
   ask: async () => {},
 };
 
+// Live reads must not touch the index at all. Point it at an impossible nested
+// path before either live tool runs; restore it before exercising indexing.
+const validIndexPath = process.env.EPISODIC_INDEX_DB;
+const blockedIndexParent = join(harnessDir, "not-a-directory");
+writeFileSync(blockedIndexParent, "blocked");
+process.env.EPISODIC_INDEX_DB = join(blockedIndexParent, "index.db");
+const preIndexWindow = await tools.episodic_read_window.execute(
+  { session_id: sessionId, anchor_message_id: "msg_user" },
+  ctx
+);
+const preIndexSession = await tools.episodic_read_session.execute({ session_id: sessionId }, ctx);
+if (typeof preIndexWindow !== "string" || typeof preIndexSession !== "string") throw new Error("harness error: live reads unexpectedly needed the index");
+process.env.EPISODIC_INDEX_DB = validIndexPath;
+
 // 1. event hook (session.idle for the fixture session)
 const { openSource, listSessions } = await import("../src/reader");
 const source = openSource();
 const sessions = listSessions(source);
 if (sessions.length !== 1 || sessions[0].id !== sessionId) throw new Error("harness error: fixture session missing");
 const target = sessions[0];
-await hooks.event({
-  event: { type: "session.idle", properties: { sessionID: target.id } },
-});
+await Promise.all([
+  hooks.event({ event: { type: "session.idle", properties: { sessionID: target.id } } }),
+  hooks.event({ event: { type: "session.idle", properties: { sessionID: target.id } } }),
+]);
 // The reindex is fire-and-forget; poll the captured plugin logs (bounded) for
-// its completion marker rather than assuming success after a fixed delay.
+// both completion markers. The second overlapping idle must queue one rerun,
+// not disappear behind the in-flight debounce.
 const REINDEX_TIMEOUT_MS = 30_000;
 const deadline = Date.now() + REINDEX_TIMEOUT_MS;
-let reindexMsg: string | undefined;
+let reindexMessages: string[] = [];
 while (Date.now() < deadline) {
-  reindexMsg = logMessages.find((m) => m.startsWith("reindexed ") || m.startsWith("reindex failed"));
-  if (reindexMsg) break;
+  reindexMessages = logMessages.filter((m) => m.startsWith("reindexed ") || m.startsWith("reindex failed"));
+  if (reindexMessages.length >= 2) break;
   await new Promise((r) => setTimeout(r, 100));
 }
-if (!reindexMsg) throw new Error(`harness error: reindex did not complete within ${REINDEX_TIMEOUT_MS}ms`);
-if (reindexMsg.startsWith("reindex failed")) throw new Error(`harness error: ${reindexMsg}`);
-console.log(`event hook OK (${reindexMsg})`);
+if (reindexMessages.length < 2) throw new Error(`harness error: queued reindex did not complete within ${REINDEX_TIMEOUT_MS}ms`);
+const failedReindex = reindexMessages.find((message) => message.startsWith("reindex failed"));
+if (failedReindex) throw new Error(`harness error: ${failedReindex}`);
+console.log(`event hook OK (${reindexMessages.join(", ")})`);
 
 // 2. episodic_search
 const result = await tools.episodic_search.execute(

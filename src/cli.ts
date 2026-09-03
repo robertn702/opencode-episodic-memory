@@ -7,13 +7,13 @@
 //     --after YYYY-MM-DD           Only conversations after this date
 //     --before YYYY-MM-DD          Only conversations before this date
 //     --limit N                    Max results (default 10)
-//   read <session-id> [--indexed]  Print a readable transcript (live DB, or --indexed for index copy)
+//   read <session-id> [--indexed --source source-id]  Print a readable transcript
 //   stats                          Index statistics
 //   doctor                         Diagnose setup
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { openSource, sourceDbPath, getSession, getTranscriptChecked } from "./reader";
-import { openIndex, indexDbPath, search, textSearch, stats, isIndexEmpty } from "./store";
+import { openConfiguredIndex, indexDbPath, type IndexStore } from "./store";
 import { syncAll } from "./indexer";
 import { embed, embedQuery, getEmbedMode } from "./embed";
 import { parseDateArg, fmtDate, renderTranscript, formatHits } from "./format";
@@ -37,6 +37,7 @@ function parseCli() {
         force: { type: "boolean" },
         indexed: { type: "boolean" },
         hybrid: { type: "boolean" },
+        source: { type: "string" },
       },
       allowPositionals: true,
       strict: true,
@@ -73,16 +74,21 @@ function limitArg(s: string | undefined): number {
   return Math.min(n, 1000);
 }
 
+async function withConfiguredIndex<T>(fn: (index: IndexStore) => Promise<T>): Promise<T> {
+  const index = await openConfiguredIndex();
+  try { return await fn(index); }
+  finally { index.close(); }
+}
+
 async function main() {
   switch (command) {
     case "sync": {
       const source = openSource();
-      const index = openIndex();
-      const r = await syncAll(source, index, {
+      const r = await withConfiguredIndex((index) => syncAll(source, index, {
         force: values.force,
         onProgress: (done, total, title) =>
           process.stderr.write(`\r[${done}/${total}] ${title.slice(0, 60)}                    `),
-      });
+      }));
       process.stderr.write("\n");
       console.log(
         `scanned=${r.scanned} indexed=${r.indexed} fresh=${r.skippedFresh} excluded=${r.excluded} empty=${r.empty} pruned=${r.pruned}`
@@ -93,21 +99,22 @@ async function main() {
     case "search": {
       const query = positionals.join(" ");
       if (!query) { console.error("usage: opencode-episodic search <query> [--text p] [--hybrid] [--after d] [--before d] [--limit n]"); process.exit(1); }
-      const index = openIndex();
       const opts = {
         limit: limitArg(values.limit),
         after: dateArg(values.after),
         before: dateArg(values.before),
       };
-      const hits = values.text
-        ? textSearch(index, values.text, opts)
-        : search(
-            index,
+      const { hits, empty } = await withConfiguredIndex(async (index) => {
+        const hits = values.text
+          ? await index.textSearch(values.text, opts)
+          : await index.search(
             (await embedQuery(query))[0],
             values.hybrid ? { ...opts, queryText: query, hybrid: true } : opts
           );
+        return { hits, empty: hits.length === 0 && await index.isEmpty() };
+      });
       if (hits.length === 0) {
-        console.log(isIndexEmpty(index)
+        console.log(empty
           ? "No results. The index is empty — run: bun run src/cli.ts sync"
           : "No results.");
       } else {
@@ -119,12 +126,12 @@ async function main() {
 
     case "read": {
       const id = positionals[0];
-      if (!id) { console.error("usage: opencode-episodic read <session-id> [--indexed]"); process.exit(1); }
+      if (!id) { console.error("usage: opencode-episodic read <session-id> [--indexed --source source-id]"); process.exit(1); }
       if (values.indexed) {
-        const index = openIndex();
-        const rows = index
-          .prepare<{ seq: number; text: string }, [string]>("SELECT seq, text FROM chunks WHERE session_id = ? ORDER BY seq")
-          .all(id);
+        const rows = await withConfiguredIndex(async (index) => {
+          if (index.remote && !values.source) throw new Error("--source is required for remote indexed reads.");
+          return index.readIndexed(id, values.source);
+        });
         if (rows.length === 0) { console.error("no indexed content for", id); process.exit(1); }
         for (const r of rows) console.log(r.text, "\n---");
         break;
@@ -144,8 +151,7 @@ async function main() {
     }
 
     case "stats": {
-      const index = openIndex();
-      const s = stats(index);
+      const s = await withConfiguredIndex((index) => index.stats());
       console.log(`sessions: ${s.sessions} (${s.excluded} excluded/empty), chunks: ${s.chunks}`);
       if (s.oldest) console.log(`range: ${fmtDate(Number(s.oldest))} → ${fmtDate(Number(s.newest))}`);
       console.log("\nTop directories:");
@@ -194,8 +200,8 @@ async function main() {
         console.log(`✓ source readable: ${n} sessions`);
       } catch (e) { console.error(`✗ source unreadable: ${e}`); ok = false; }
       try {
-        const idx = openIndex();
-        console.log(`✓ index writable: ${indexDbPath()}`);
+        const idx = await openConfiguredIndex();
+        console.log(`✓ index writable: ${idx.remote ? "remote index" : indexDbPath()}`);
         idx.close();
       } catch (e) { console.error(`✗ index not writable: ${e}`); ok = false; }
       try {

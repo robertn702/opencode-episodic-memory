@@ -9,8 +9,9 @@ user-facing usage, see [README.md](README.md).
 ## System overview
 
 The project has a Bun host and a lazily started system-Node embedding sidecar,
-two SQLite databases, and no remote service (except the one-time embedding-model
-download). The Bun host reads OpenCode's session store, sends prepared condensed
+two local SQLite databases by default. Opting into `EPISODIC_INDEX_URL` replaces
+the local index with a libSQL-compatible remote index; the Bun host still reads
+the local source and generates embeddings locally, then sends prepared condensed
 exchanges to the Node process for local embedding, and serves search through two
 thin front-ends: an OpenCode plugin (agent tools + auto-reindex) and a CLI
 (`sync/search/read/stats/doctor`).
@@ -31,9 +32,10 @@ flowchart LR
         ES[embed-sidecar.mjs<br/>Transformers.js singleton<br/>Snowflake arctic-embed-m<br/>q8 · CLS pool · 768 dims]
     end
 
-    subgraph Index["Index (read/write)"]
-        IDB[("~/.local/share/opencode-episodic-memory/<br/>index.db<br/>sessions / chunks / chunks_fts")]
-        S[store.ts<br/>brute-force cosine +<br/>FTS5 BM25 + RRF fusion]
+    subgraph Index["Index (read/write; local default or opt-in remote)"]
+        IDB[("local index.db<br/>sessions / chunks / chunks_fts")]
+        RDB[("libSQL remote<br/>source-scoped sessions / chunks")]
+        S[store.ts<br/>async configured boundary;<br/>client-side cosine]
     end
 
     subgraph Frontends["Front-ends"]
@@ -49,6 +51,7 @@ flowchart LR
     E <-->|NDJSON stdin/stdout| ES
     E --> S
     S <--> IDB
+    S <--> RDB
     PLG --> S
     CLI --> S
     PLG -.->|session.idle| R
@@ -69,8 +72,8 @@ transcript rendering, hit formatting — so the CLI and plugin can't drift apart
 | `src/embed.ts` | Embedding API + Node-sidecar client. Prepares text, manages one lazy child, and validates protocol vectors without importing Transformers.js | `embed` (docs), `embedQuery` (adds retrieval prefix), `QUERY_PREFIX`, `MAX_CHARS` |
 | `src/embed-sidecar.mjs` | Plain Node ESM NDJSON server; dynamically imports Transformers.js and holds the warm pipeline | protocol `{id,texts}` -> `{id,vectors}` / `{id,error}` |
 | `src/embed-inline.ts` | Explicit lazy inline fallback for exceptional hosts | `embedInline` |
-| `src/store.ts` | Index SQLite schema + all retrieval (vector / BM25 / hybrid RRF) | `openIndex`, `replaceSessionChunks`, `search`, `textSearch`, `stats` |
-| `src/indexer.ts` | Incremental, idempotent sync; watermark-based; orphan pruning | `syncSession`, `syncAll`, `pruneOrphans` |
+| `src/store.ts` | Local SQLite schema/retrieval plus the opt-in async libSQL boundary | `openIndex`, `openConfiguredIndex`, `replaceSessionChunks`, `search`, `textSearch`, `stats` |
+| `src/indexer.ts` | Incremental, idempotent sync; watermark-based; source-scoped remote pruning | `syncSession`, `syncAll`, `pruneOrphans` |
 | `src/format.ts` | Shared presentation for CLI + plugin | `parseDateArg`, `renderTranscript`, `renderTranscriptContext`, `formatHits` |
 | `src/cli.ts` | `opencode-episodic` binary: sync / search / read / stats / doctor | — |
 | `plugin/episodic-memory.ts` | OpenCode plugin: tools + `session.idle` reindex (debounced, fire-and-forget) | `EpisodicMemory` |
@@ -139,6 +142,20 @@ chunks_fts  FTS5 virtual table, external content over chunks.text,
 > silently misaligning every FTS posting from its chunk row. If VACUUM is ever
 > needed, first migrate `chunks` to an explicit `rowid INTEGER PRIMARY KEY`.
 
+### Optional remote index (libSQL/Turso-compatible)
+
+Remote mode is selected only when `EPISODIC_INDEX_URL` is set. It uses separate
+`episodic_sessions` and `episodic_chunks` tables keyed by
+`(source_id, session_id)` and `(source_id, session_id, seq)`, plus an explicit
+schema-version table. Opening validates the version, required columns, and
+composite primary keys before adopting an existing database.
+
+Each device supplies a stable `EPISODIC_SOURCE_ID`. Freshness checks, writes,
+indexed reads, and orphan pruning are scoped to that ID, while vector search
+scores chunks from every source. Excluded sessions retain no remote tombstone:
+the source-scoped row and chunks are deleted so the privacy marker exports no
+conversation metadata. Remote mode has no FTS tables or triggers.
+
 ## Write path: indexing
 
 Two triggers feed the same code path: the CLI's `sync` command (bulk,
@@ -158,7 +175,17 @@ sequenceDiagram
     participant S as store.ts
 
     T->>I: syncAll() / syncSession()
-    I->>S: getIndexedSession(id)
+    alt remote index
+        I->>R: getTranscriptChecked(id) privacy gate first
+        alt marker present
+            R-->>I: { excluded: true }
+            I->>S: delete source-scoped session + chunks (no tombstone)
+        else clean
+            I->>S: getIndexedSession(id)
+        end
+    else local index
+        I->>S: getIndexedSession(id) freshness-first
+    end
     alt fresh (source_time_updated ≥ session.time_updated)
         S-->>I: watermark says unchanged
         I-->>T: "fresh" (skip)
@@ -167,7 +194,7 @@ sequenceDiagram
         R->>R: transcriptHasMarker()<br/>(raw instr() scan, no JSON parse)
         alt marker present
             R-->>I: { excluded: true }
-            I->>S: replaceSessionChunks([], status="excluded")
+            I->>S: replaceSessionChunks([], status="excluded") local tombstone
         else clean
             R-->>I: { messages }
             I->>P: parseTranscript(messages)
@@ -193,6 +220,9 @@ Key properties:
 
 - **Idempotent**: watermark = `session.time_updated`; re-running sync only
   touches changed sessions (`--force` bypasses).
+- **Source-isolated remotely**: the same OpenCode session ID can coexist under
+  multiple source IDs, and pruning one source cannot delete another source's
+  rows. The privacy gate runs before a remote freshness lookup.
 - **Privacy-first**: the exclusion gate (`DO NOT INDEX THIS CHAT`) runs as a
   raw `instr()` substring scan over the unparsed `data` column *before* any
   transcript is materialized. Full reads use `getTranscriptChecked()`;
@@ -233,6 +263,10 @@ Design notes on retrieval:
   rank) only; phase 2 hydrates display fields via point lookups on the
   `(session_id, seq)` PK for just the winners (≤ 50 in the plugin). Per-query
   cost is dims arithmetic, not full-row materialization.
+- **Remote vector search**: embedding candidates are read in bounded pages and
+  scored locally inside one read transaction; only the top-K winners are then
+  hydrated in that same snapshot. Text, BM25, and hybrid retrieval remain local
+  features and fail explicitly in remote mode.
 - **Vector-only by default.** Hybrid (vector + BM25 via RRF) is opt-in:
   empirically, on this corpus BM25 matches injected boilerplate (the `[MEMORY]`
   preamble, tool descriptions) and RRF drags that noise above genuine semantic
@@ -265,6 +299,8 @@ structural drift isn't silently masked).
 | Privacy gate on raw blobs, gated read entry points | The opt-out marker must not depend on JSON parseability; full and bounded reads each enforce the same raw gate before materialization. |
 | Zod on source reads only | Structural rows throw (fail-loud on OpenCode schema drift); JSON blobs degrade per-row. The index DB uses typed `prepare<T>()` casts — we own that schema end to end. No `as` assertions elsewhere. |
 | Watermark incremental sync + orphan pruning | Cheap re-indexes; deleted conversations don't linger with stale embeddings. |
+| Source-scoped remote rows | Cross-device search can combine histories without one device overwriting or pruning another device's sessions. |
+| Remote vector-only v1 | Avoids relying on hosted FTS virtual tables, triggers, or migration behavior; cosine ranking remains client-side. |
 | Shared `format.ts` | CLI and plugin stay thin and can't drift apart in output formatting or date handling. |
 | Node sidecar by default | Importing the plugin must not dlopen Transformers.js native addons (`onnxruntime-node`, `sharp`) into OpenCode's embedded Bun. A detached, unref'd Node 20+ process starts only on the first embedding, serializes inference, and exits on stdin EOF when its Bun host goes away. |
 | Inline is explicit and lazy | `EPISODIC_EMBED_MODE=inline` dynamically imports its backend only on an embedding call, but is unsafe on affected OpenCode/Bun versions with native-addon teardown defects. There is never automatic fallback from failed sidecar startup to inline. |

@@ -10,6 +10,7 @@
 // extension, so the sqlite-vec limitation doesn't apply). search() fuses the
 // vector and BM25 rankings via reciprocal rank fusion.
 import { Database } from "bun:sqlite";
+import type { Client, InStatement, Transaction } from "@libsql/client";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -22,6 +23,7 @@ const FTS_SCHEMA_VERSION = 1;
 // ranked list fusion looks — contributions past this depth are negligible.
 const RRF_K = 60;
 const FUSE_DEPTH = 200;
+const REMOTE_PAGE_SIZE = 250;
 
 export function indexDbPath(): string {
   return process.env.EPISODIC_INDEX_DB ?? DEFAULT_INDEX_DB;
@@ -168,6 +170,7 @@ export function replaceSessionChunks(
 }
 
 export interface SearchHit {
+  source_id?: string;
   session_id: string;
   seq: number;
   time_created: number;
@@ -202,6 +205,7 @@ export interface SearchOptions {
 
 // A scored candidate before display fields are fetched (phase 1 output).
 interface ScoredChunk {
+  source_id?: string;
   session_id: string;
   seq: number;
   time_created: number;
@@ -417,4 +421,353 @@ export function stats(db: Database): IndexStats {
       )
       .all(),
   };
+}
+
+// The production boundary is intentionally small: local callers retain the
+// synchronous helpers above, while configured indexes use this async shape so
+// libSQL's network operations cannot be accidentally treated as local I/O.
+export interface IndexStore {
+  readonly remote: boolean;
+  readonly sourceId?: string;
+  getIndexedSession(id: string): Promise<IndexedSession | null>;
+  replaceSessionChunks(
+    session: { id: string; project_id: string; parent_id: string | null; title: string; directory: string; time_created: number; source_time_updated: number },
+    chunks: { seq: number; time_created: number; text: string; embedding: Float32Array; anchor_message_id?: string | null }[],
+    status?: string,
+  ): Promise<void>;
+  removeSession(id: string): Promise<void>;
+  pruneOrphans(sourceIds: string[]): Promise<number>;
+  search(query: Float32Array, opts?: SearchOptions): Promise<SearchHit[]>;
+  textSearch(query: string, opts?: SearchOptions): Promise<SearchHit[]>;
+  isEmpty(): Promise<boolean>;
+  stats(): Promise<IndexStats>;
+  readIndexed(sessionId: string, sourceId?: string): Promise<{ text: string }[]>;
+  close(): void;
+}
+
+class LocalIndexStore implements IndexStore {
+  readonly remote = false;
+  constructor(private readonly db: Database) {}
+  async getIndexedSession(id: string) { return getIndexedSession(this.db, id); }
+  async replaceSessionChunks(...args: Parameters<IndexStore["replaceSessionChunks"]>) {
+    replaceSessionChunks(this.db, ...args);
+  }
+  async removeSession(id: string) {
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM chunks WHERE session_id = ?", [id]);
+      this.db.run("DELETE FROM sessions WHERE id = ?", [id]);
+    })();
+  }
+  async pruneOrphans(sourceIds: string[]) {
+    const ids = new Set(sourceIds);
+    const rows = this.db.prepare<{ id: string }, []>("SELECT id FROM sessions").all();
+    let pruned = 0;
+    this.db.transaction(() => {
+      for (const { id } of rows) {
+        if (ids.has(id)) continue;
+        this.db.run("DELETE FROM chunks WHERE session_id = ?", [id]);
+        this.db.run("DELETE FROM sessions WHERE id = ?", [id]);
+        pruned++;
+      }
+    })();
+    return pruned;
+  }
+  async search(query: Float32Array, opts: SearchOptions = {}) { return search(this.db, query, opts); }
+  async textSearch(query: string, opts: SearchOptions = {}) { return textSearch(this.db, query, opts); }
+  async isEmpty() { return isIndexEmpty(this.db); }
+  async stats() { return stats(this.db); }
+  async readIndexed(sessionId: string) {
+    return this.db.prepare<{ text: string }, [string]>("SELECT text FROM chunks WHERE session_id = ? ORDER BY seq").all(sessionId);
+  }
+  close() { this.db.close(); }
+}
+
+export function localIndexStore(db: Database): IndexStore {
+  return new LocalIndexStore(db);
+}
+
+export interface RemoteIndexConfig { url: string; sourceId: string; authToken?: string; }
+
+export function canLiveRead(config: RemoteIndexConfig | null, sourceId: string | undefined): boolean {
+  return config === null || sourceId === config.sourceId;
+}
+
+export function remoteIndexConfig(env: NodeJS.ProcessEnv = process.env): RemoteIndexConfig | null {
+  const url = env.EPISODIC_INDEX_URL;
+  if (!url) return null;
+  if (url.includes("\\")) throw new Error("EPISODIC_INDEX_URL must not contain backslashes.");
+  const authority = /^\w+:\/\/([^/?#]*)/.exec(url)?.[1];
+  if (authority?.includes("%")) throw new Error("EPISODIC_INDEX_URL must not percent-encode its authority.");
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error("EPISODIC_INDEX_URL must be a valid URL."); }
+  if (parsed.protocol === "file:" && (!url.slice("file:".length).startsWith("/") || parsed.host)) {
+    throw new Error("EPISODIC_INDEX_URL file URLs must use an absolute local path.");
+  }
+  if (parsed.username || parsed.password) throw new Error("EPISODIC_INDEX_URL must not contain credentials; use EPISODIC_INDEX_AUTH_TOKEN.");
+  if ([...parsed.searchParams.keys()].some((key) => key.toLowerCase() === "authtoken")) {
+    throw new Error("EPISODIC_INDEX_URL must not contain credentials; use EPISODIC_INDEX_AUTH_TOKEN.");
+  }
+  if (parsed.protocol === "http:" || parsed.protocol === "ws:") throw new Error("EPISODIC_INDEX_URL requires secure transport.");
+  if (!["file:", "https:", "wss:", "libsql:"].includes(parsed.protocol)) throw new Error("EPISODIC_INDEX_URL must use file:, https:, wss:, or libsql:.");
+  if (parsed.protocol !== "file:" && !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(parsed.hostname)) {
+    throw new Error("EPISODIC_INDEX_URL must use a canonical DNS hostname.");
+  }
+  if (parsed.protocol === "libsql:") {
+    const queryStart = url.indexOf("?");
+    const fragmentStart = url.indexOf("#", queryStart < 0 ? 0 : queryStart);
+    const rawQuery = queryStart < 0 ? "" : url.slice(queryStart + 1, fragmentStart < 0 ? undefined : fragmentStart);
+    if (parsed.hash || (rawQuery !== "" && rawQuery !== "tls=1")) {
+      throw new Error("EPISODIC_INDEX_URL supports only the exact libsql query parameter tls=1.");
+    }
+  }
+  const sourceId = env.EPISODIC_SOURCE_ID;
+  if (!sourceId) throw new Error("EPISODIC_SOURCE_ID is required when EPISODIC_INDEX_URL is configured.");
+  const authToken = env.EPISODIC_INDEX_AUTH_TOKEN;
+  if (parsed.protocol !== "file:" && !authToken) throw new Error("EPISODIC_INDEX_AUTH_TOKEN is required for a remote EPISODIC_INDEX_URL.");
+  return { url: parsed.href, sourceId, authToken };
+}
+
+function rowString(row: Record<string, unknown>, key: string): string {
+  const value = row[key];
+  if (typeof value !== "string") throw new Error(`Remote index returned invalid ${key}.`);
+  return value;
+}
+
+function rowNumber(row: Record<string, unknown>, key: string): number {
+  const value = row[key];
+  if (typeof value !== "number") throw new Error(`Remote index returned invalid ${key}.`);
+  return value;
+}
+
+function rowNullableString(row: Record<string, unknown>, key: string): string | null {
+  const value = row[key];
+  if (value === null) return null;
+  if (typeof value !== "string") throw new Error(`Remote index returned invalid ${key}.`);
+  return value;
+}
+
+function rowBlob(row: Record<string, unknown>, key: string): Uint8Array {
+  const value = row[key];
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (value instanceof Uint8Array) return value;
+  throw new Error(`Remote index returned invalid ${key}.`);
+}
+
+class RemoteIndexStore implements IndexStore {
+  readonly remote = true;
+  constructor(readonly sourceId: string, private readonly client: Client) {}
+
+  static async open(url: string, sourceId: string, authToken?: string): Promise<RemoteIndexStore> {
+    const { createClient } = await import("@libsql/client");
+    const client = createClient({ url, authToken });
+    const store = new RemoteIndexStore(sourceId, client);
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await store.initialize();
+          return store;
+        } catch (error) {
+          if (!(error instanceof Error) || !error.message.includes("SQLITE_BUSY") || attempt === 9) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 10 * (attempt + 1)));
+        }
+      }
+    } catch (error) {
+      client.close();
+      throw error;
+    }
+  }
+
+  private async tableExists(db: Pick<Transaction, "execute">, name: string): Promise<boolean> {
+    const result = await db.execute({ sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?)", args: [name] });
+    return result.rows.length > 0;
+  }
+
+  private async validateTable(db: Pick<Transaction, "execute">, name: string, requiredColumns: string[], primaryKey: string[]): Promise<void> {
+    const result = await db.execute(`PRAGMA table_info(${name})`);
+    const columns = result.rows.map((row) => ({ name: rowString(row, "name").toLowerCase(), pk: rowNumber(row, "pk") }));
+    const actual = new Set(columns.map((column) => column.name));
+    if (requiredColumns.some((column) => !actual.has(column.toLowerCase()))) {
+      throw new Error(`Incompatible remote index schema: ${name} is missing required columns.`);
+    }
+    const actualPrimaryKey = columns.filter((column) => column.pk > 0).sort((a, b) => a.pk - b.pk).map((column) => column.name);
+    if (actualPrimaryKey.join("\0") !== primaryKey.map((column) => column.toLowerCase()).join("\0")) {
+      throw new Error(`Incompatible remote index schema: ${name} must use primary key (${primaryKey.join(", ")}).`);
+    }
+  }
+
+  private async initialize(): Promise<void> {
+    const transaction = await this.client.transaction("write");
+    try {
+      const versionsExist = await this.tableExists(transaction, "episodic_schema_versions");
+      const initialVersion = versionsExist
+        ? (await transaction.execute({ sql: "SELECT version FROM episodic_schema_versions WHERE name = ?", args: ["remote-index"] })).rows[0]
+        : undefined;
+      if (initialVersion) {
+        const version = rowNumber(initialVersion, "version");
+        if (version > 1) throw new Error(`Unsupported future remote index schema version: ${version}.`);
+        if (version !== 1) throw new Error(`Unsupported remote index schema version: ${version}.`);
+      }
+      const sessionsExist = await this.tableExists(transaction, "episodic_sessions");
+      const chunksExist = await this.tableExists(transaction, "episodic_chunks");
+      if (sessionsExist !== chunksExist) throw new Error("Incompatible remote index schema: episodic_sessions and episodic_chunks must both exist.");
+      if (sessionsExist) {
+        await this.validateTable(transaction, "episodic_sessions", ["source_id", "session_id", "project_id", "parent_id", "title", "directory", "time_created", "source_time_updated", "indexed_at", "status"], ["source_id", "session_id"]);
+        await this.validateTable(transaction, "episodic_chunks", ["source_id", "session_id", "seq", "time_created", "anchor_message_id", "text", "embedding"], ["source_id", "session_id", "seq"]);
+      } else if (initialVersion) {
+        throw new Error("Incompatible remote index schema: version 1 is missing required tables.");
+      }
+
+      if (!sessionsExist) {
+        await transaction.batch([
+          { sql: "CREATE TABLE IF NOT EXISTS episodic_schema_versions (name TEXT PRIMARY KEY, version INTEGER NOT NULL)" },
+          { sql: `CREATE TABLE IF NOT EXISTS episodic_sessions (
+            source_id TEXT NOT NULL, session_id TEXT NOT NULL, project_id TEXT NOT NULL, parent_id TEXT,
+            title TEXT NOT NULL, directory TEXT NOT NULL, time_created INTEGER NOT NULL,
+            source_time_updated INTEGER NOT NULL, indexed_at INTEGER NOT NULL, status TEXT NOT NULL,
+            PRIMARY KEY (source_id, session_id))` },
+          { sql: `CREATE TABLE IF NOT EXISTS episodic_chunks (
+            source_id TEXT NOT NULL, session_id TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+            anchor_message_id TEXT, text TEXT NOT NULL, embedding BLOB NOT NULL,
+            PRIMARY KEY (source_id, session_id, seq))` },
+          { sql: "CREATE INDEX IF NOT EXISTS episodic_chunks_time_idx ON episodic_chunks(time_created)" },
+          { sql: "INSERT INTO episodic_schema_versions(name, version) VALUES ('remote-index', 1) ON CONFLICT(name) DO NOTHING" },
+        ]);
+      } else {
+        // Existing tables were validated before this first write, so malformed
+        // unversioned databases remain completely untouched.
+        await transaction.batch([
+          { sql: "CREATE TABLE IF NOT EXISTS episodic_schema_versions (name TEXT PRIMARY KEY, version INTEGER NOT NULL)" },
+          { sql: "CREATE INDEX IF NOT EXISTS episodic_chunks_time_idx ON episodic_chunks(time_created)" },
+          { sql: "INSERT INTO episodic_schema_versions(name, version) VALUES ('remote-index', 1) ON CONFLICT(name) DO NOTHING" },
+        ]);
+      }
+      const versionResult = await transaction.execute({ sql: "SELECT version FROM episodic_schema_versions WHERE name = ?", args: ["remote-index"] });
+      const versionRow = versionResult.rows[0];
+      if (versionRow) {
+        const version = rowNumber(versionRow, "version");
+        if (version > 1) throw new Error(`Unsupported future remote index schema version: ${version}.`);
+        if (version !== 1) throw new Error(`Unsupported remote index schema version: ${version}.`);
+      } else throw new Error("Remote index schema version was not recorded.");
+      await transaction.commit();
+    } finally {
+      transaction.close();
+    }
+  }
+
+  async getIndexedSession(id: string): Promise<IndexedSession | null> {
+    const result = await this.client.execute({ sql: "SELECT session_id AS id, project_id, parent_id, title, directory, time_created, source_time_updated, indexed_at, status FROM episodic_sessions WHERE source_id = ? AND session_id = ?", args: [this.sourceId, id] });
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      id: rowString(row, "id"), project_id: rowString(row, "project_id"), parent_id: rowNullableString(row, "parent_id"),
+      title: rowString(row, "title"), directory: rowString(row, "directory"), time_created: rowNumber(row, "time_created"),
+      source_time_updated: rowNumber(row, "source_time_updated"), indexed_at: rowNumber(row, "indexed_at"), status: rowString(row, "status"),
+    };
+  }
+
+  async replaceSessionChunks(session: { id: string; project_id: string; parent_id: string | null; title: string; directory: string; time_created: number; source_time_updated: number }, chunks: { seq: number; time_created: number; text: string; embedding: Float32Array; anchor_message_id?: string | null }[], status: string = "indexed"): Promise<void> {
+    const statements: InStatement[] = [{
+      sql: `INSERT INTO episodic_sessions (source_id, session_id, project_id, parent_id, title, directory, time_created, source_time_updated, indexed_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_id, session_id) DO UPDATE SET project_id=excluded.project_id, parent_id=excluded.parent_id, title=excluded.title, directory=excluded.directory, time_created=excluded.time_created, source_time_updated=excluded.source_time_updated, indexed_at=excluded.indexed_at, status=excluded.status`,
+      args: [this.sourceId, session.id, session.project_id, session.parent_id, session.title, session.directory, session.time_created, session.source_time_updated, Date.now(), status],
+    }, { sql: "DELETE FROM episodic_chunks WHERE source_id = ? AND session_id = ?", args: [this.sourceId, session.id] }];
+    for (const chunk of chunks) {
+      statements.push({ sql: "INSERT INTO episodic_chunks (source_id, session_id, seq, time_created, anchor_message_id, text, embedding) VALUES (?, ?, ?, ?, ?, ?, ?)", args: [this.sourceId, session.id, chunk.seq, chunk.time_created, chunk.anchor_message_id ?? null, chunk.text, new Uint8Array(chunk.embedding.buffer, chunk.embedding.byteOffset, chunk.embedding.byteLength)] });
+    }
+    await this.client.batch(statements, "write");
+  }
+
+  async removeSession(id: string): Promise<void> {
+    await this.client.batch([
+      { sql: "DELETE FROM episodic_chunks WHERE source_id = ? AND session_id = ?", args: [this.sourceId, id] },
+      { sql: "DELETE FROM episodic_sessions WHERE source_id = ? AND session_id = ?", args: [this.sourceId, id] },
+    ], "write");
+  }
+
+  async pruneOrphans(sourceIds: string[]): Promise<number> {
+    const existing = await this.client.execute({ sql: "SELECT session_id FROM episodic_sessions WHERE source_id = ?", args: [this.sourceId] });
+    const sourceSet = new Set(sourceIds);
+    const stale = existing.rows.map((row) => rowString(row, "session_id")).filter((id) => !sourceSet.has(id));
+    if (stale.length === 0) return 0;
+    const statements = stale.flatMap((id) => [
+      { sql: "DELETE FROM episodic_chunks WHERE source_id = ? AND session_id = ?", args: [this.sourceId, id] },
+      { sql: "DELETE FROM episodic_sessions WHERE source_id = ? AND session_id = ?", args: [this.sourceId, id] },
+    ]);
+    await this.client.batch(statements, "write");
+    return stale.length;
+  }
+
+  async search(query: Float32Array, opts: SearchOptions = {}): Promise<SearchHit[]> {
+    if (opts.hybrid) throw new Error("Hybrid search is unavailable with EPISODIC_INDEX_URL; remote indexes support vector search only.");
+    if (opts.text) throw new Error("Text filtering is unavailable with EPISODIC_INDEX_URL; remote indexes support vector search only.");
+    const clauses: string[] = [];
+    const args: (string | number)[] = [];
+    if (opts.after !== undefined) { clauses.push("c.time_created >= ?"); args.push(opts.after); }
+    if (opts.before !== undefined) { clauses.push("c.time_created < ?"); args.push(opts.before); }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const dims = query.length;
+    const scored: ScoredChunk[] = [];
+    const transaction = await this.client.transaction("read");
+    try {
+      for (let offset = 0; ; offset += REMOTE_PAGE_SIZE) {
+        const result = await transaction.execute({ sql: `SELECT c.source_id, c.session_id, c.seq, c.time_created, c.embedding FROM episodic_chunks c ${where} ORDER BY c.source_id, c.session_id, c.seq LIMIT ? OFFSET ?`, args: [...args, REMOTE_PAGE_SIZE, offset] });
+        for (const row of result.rows) {
+          const blob = rowBlob(row, "embedding");
+          if (blob.byteLength !== dims * 4) continue;
+          const vector = new Float32Array(blob.buffer, blob.byteOffset, dims);
+          let score = 0;
+          for (let i = 0; i < dims; i++) score += query[i] * vector[i];
+          if (score < (opts.minScore ?? 0)) continue;
+          scored.push({ source_id: rowString(row, "source_id"), session_id: rowString(row, "session_id"), seq: rowNumber(row, "seq"), time_created: rowNumber(row, "time_created"), score });
+        }
+        if (result.rows.length < REMOTE_PAGE_SIZE) break;
+      }
+      const winners = scored.sort((a, b) => b.score - a.score).slice(0, opts.limit ?? 10);
+      if (winners.length === 0) return [];
+      const details = await transaction.batch(winners.map((winner) => ({
+        sql: `SELECT c.text, c.anchor_message_id, s.title, s.directory FROM episodic_chunks c
+          JOIN episodic_sessions s ON s.source_id = c.source_id AND s.session_id = c.session_id
+          WHERE c.source_id = ? AND c.session_id = ? AND c.seq = ?`,
+        args: [winner.source_id ?? "", winner.session_id, winner.seq],
+      })));
+      const hits: SearchHit[] = [];
+      for (let i = 0; i < winners.length; i++) {
+        const row = details[i].rows[0];
+        if (!row) continue;
+        const winner = winners[i];
+        hits.push({ source_id: winner.source_id, session_id: winner.session_id, seq: winner.seq, time_created: winner.time_created, score: winner.score, text: rowString(row, "text"), anchor_message_id: rowNullableString(row, "anchor_message_id"), title: rowString(row, "title"), directory: rowString(row, "directory") });
+      }
+      return hits;
+    } finally {
+      transaction.close();
+    }
+  }
+
+  async textSearch(): Promise<SearchHit[]> { throw new Error("Text search is unavailable with EPISODIC_INDEX_URL; remote indexes support vector search only."); }
+  async isEmpty(): Promise<boolean> {
+    const result = await this.client.execute("SELECT COUNT(*) AS n FROM episodic_chunks");
+    const row = result.rows[0];
+    return !row || rowNumber(row, "n") === 0;
+  }
+  async stats(): Promise<IndexStats> {
+    const sessions = await this.client.execute("SELECT COUNT(*) AS n FROM episodic_sessions");
+    const excluded = await this.client.execute("SELECT COUNT(*) AS n FROM episodic_sessions WHERE status != 'indexed'");
+    const chunks = await this.client.execute("SELECT COUNT(*) AS n, MIN(time_created) AS oldest, MAX(time_created) AS newest FROM episodic_chunks");
+    const directories = await this.client.execute("SELECT directory, COUNT(*) AS n FROM episodic_sessions WHERE status = 'indexed' GROUP BY directory ORDER BY n DESC LIMIT 10");
+    const chunk = chunks.rows[0];
+    if (!chunk) throw new Error("Remote stats query returned no row.");
+    return { sessions: rowNumber(sessions.rows[0], "n"), excluded: rowNumber(excluded.rows[0], "n"), chunks: rowNumber(chunk, "n"), oldest: chunk.oldest === null ? null : rowNumber(chunk, "oldest"), newest: chunk.newest === null ? null : rowNumber(chunk, "newest"), byDirectory: directories.rows.map((row) => ({ directory: rowString(row, "directory"), n: rowNumber(row, "n") })) };
+  }
+  async readIndexed(sessionId: string, sourceId: string = this.sourceId): Promise<{ text: string }[]> {
+    const result = await this.client.execute({ sql: "SELECT text FROM episodic_chunks WHERE source_id = ? AND session_id = ? ORDER BY seq", args: [sourceId, sessionId] });
+    return result.rows.map((row) => ({ text: rowString(row, "text") }));
+  }
+  close() { this.client.close(); }
+}
+
+export async function openConfiguredIndex(): Promise<IndexStore> {
+  const config = remoteIndexConfig();
+  if (!config) return localIndexStore(openIndex());
+  return RemoteIndexStore.open(config.url, config.sourceId, config.authToken);
 }

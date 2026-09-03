@@ -1,10 +1,10 @@
 // Incremental, idempotent indexer. Watermark = session.time_updated; a session
 // is re-embedded only when the source changed since we last indexed it.
 import type { Database } from "bun:sqlite";
-import { getTranscriptChecked, listSessions, type SourceSession } from "./reader";
+import { getTranscriptChecked, listSessions, transcriptHasMarker, type SourceSession } from "./reader";
 import { parseTranscript, exchangeText } from "./parser";
 import { embed } from "./embed";
-import { getIndexedSession, replaceSessionChunks } from "./store";
+import type { IndexStore } from "./store";
 
 export interface SyncResult {
   scanned: number;
@@ -17,20 +17,33 @@ export interface SyncResult {
 
 export async function syncSession(
   source: Database,
-  index: Database,
+  index: IndexStore,
   s: SourceSession,
   force = false
 ): Promise<"indexed" | "fresh" | "excluded" | "empty"> {
-  const prior = getIndexedSession(index, s.id);
+  const removeIfRemoteExcluded = async (): Promise<boolean> => {
+    if (!index.remote || !transcriptHasMarker(source, s.id)) return false;
+    await index.removeSession(s.id);
+    return true;
+  };
+  // Remote freshness must never preserve metadata for a newly excluded session.
+  // Local mode intentionally keeps its established cheap freshness-first path.
+  const checked = index.remote ? getTranscriptChecked(source, s.id) : undefined;
+  if (checked?.excluded) {
+    await index.removeSession(s.id);
+    return "excluded";
+  }
+  const prior = await index.getIndexedSession(s.id);
+  if (await removeIfRemoteExcluded()) return "excluded";
   if (!force && prior && prior.source_time_updated >= s.time_updated) return "fresh";
 
   // Authoritative opt-out gate lives inside getTranscriptChecked (raw-blob
   // scan before any read); parseTranscript's own parsed-text check is a
   // harmless redundant fast path for the non-excluded branch.
-  const checked = getTranscriptChecked(source, s.id);
-  const { exchanges, excluded } = checked.excluded
+  const transcript = checked ?? getTranscriptChecked(source, s.id);
+  const { exchanges, excluded } = transcript.excluded
     ? { exchanges: [], excluded: true }
-    : parseTranscript(checked.messages);
+    : parseTranscript(transcript.messages);
   const meta = {
     id: s.id, project_id: s.project_id, parent_id: s.parent_id,
     title: s.title, directory: s.directory,
@@ -38,19 +51,26 @@ export async function syncSession(
   };
 
   if (excluded) {
-    replaceSessionChunks(index, meta, [], "excluded");
+    // A remote index is an opt-in upload boundary: unlike the local index's
+    // useful excluded tombstone, it must retain no metadata for marked chats.
+    if (index.remote) await index.removeSession(s.id);
+    else await index.replaceSessionChunks(meta, [], "excluded");
     return "excluded";
   }
   if (exchanges.length === 0) {
-    replaceSessionChunks(index, meta, [], "empty");
+    if (await removeIfRemoteExcluded()) return "excluded";
+    await index.replaceSessionChunks(meta, [], "empty");
     return "empty";
   }
 
   const date = new Date(s.time_created).toISOString().slice(0, 10);
   const texts = exchanges.map((e) => exchangeText(s.title, date, e));
   const vectors = await embed(texts);
-  replaceSessionChunks(
-    index,
+  // Embedding can take long enough for the source conversation to change. Run
+  // the cheap authoritative raw-marker check again immediately before a remote
+  // upload so a marker added during embedding never exports the prepared data.
+  if (await removeIfRemoteExcluded()) return "excluded";
+  await index.replaceSessionChunks(
     meta,
     exchanges.map((e, i) => ({
       seq: i, time_created: e.time, text: texts[i], embedding: vectors[i], anchor_message_id: e.anchorMessageId,
@@ -61,7 +81,7 @@ export async function syncSession(
 
 export async function syncAll(
   source: Database,
-  index: Database,
+  index: IndexStore,
   opts: { force?: boolean; onProgress?: (done: number, total: number, title: string) => void } = {}
 ): Promise<SyncResult> {
   const sessions = listSessions(source);
@@ -78,7 +98,7 @@ export async function syncAll(
 
   // Prune index rows whose session no longer exists in the source DB;
   // otherwise their stale (possibly wrong-dims) chunks linger forever.
-  result.pruned = pruneOrphans(source, index, sessions);
+  result.pruned = await pruneOrphans(source, index, sessions);
 
   return result;
 }
@@ -87,15 +107,6 @@ export async function syncAll(
 // source DB. Extracted so the plugin's full-reindex path can call it without
 // re-running the whole sync. Pass already-fetched sessions to avoid a redundant
 // query in syncAll; omitted, it re-reads the source.
-export function pruneOrphans(source: Database, index: Database, knownSource?: SourceSession[]): number {
-  const sourceIds = new Set((knownSource ?? listSessions(source)).map((s) => s.id));
-  const indexedIds = index.prepare<{ id: string }, []>("SELECT id FROM sessions").all();
-  let pruned = 0;
-  for (const { id } of indexedIds) {
-    if (sourceIds.has(id)) continue;
-    index.run("DELETE FROM chunks WHERE session_id = ?", [id]);
-    index.run("DELETE FROM sessions WHERE id = ?", [id]);
-    pruned++;
-  }
-  return pruned;
+export async function pruneOrphans(source: Database, index: IndexStore, knownSource?: SourceSession[]): Promise<number> {
+  return index.pruneOrphans((knownSource ?? listSessions(source)).map((s) => s.id));
 }

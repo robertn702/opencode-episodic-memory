@@ -39,6 +39,7 @@
     "prepublishOnly": "bun run typecheck && bun test && bun run verify:entrypoint"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "@huggingface/transformers": "^4.2.0",
     "@opencode-ai/plugin": "^1.18.4",
     "zod": "^4.4.3"
