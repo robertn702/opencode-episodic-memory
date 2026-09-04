@@ -128,10 +128,11 @@ async function main() {
       const id = positionals[0];
       if (!id) { console.error("usage: opencode-episodic read <session-id> [--indexed --source source-id]"); process.exit(1); }
       if (values.indexed) {
-        const rows = await withConfiguredIndex(async (index) => {
-          if (index.remote && !values.source) throw new Error("--source is required for remote indexed reads.");
-          return index.readIndexed(id, values.source);
-        });
+        if (process.env.EPISODIC_INDEX_URL && !values.source) {
+          console.error("error: --source is required for remote indexed reads.");
+          process.exit(1);
+        }
+        const rows = await withConfiguredIndex((index) => index.readIndexed(id, values.source));
         if (rows.length === 0) { console.error("no indexed content for", id); process.exit(1); }
         for (const r of rows) console.log(r.text, "\n---");
         break;
