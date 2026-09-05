@@ -255,6 +255,12 @@ flowchart TB
 
     H["hydrate<br/>fetch text/title/directory/anchor<br/>for top-K winners only"] --> FMT["format.ts<br/>markdown hits, snippet capped,<br/>score label: cosine vs rrf"]
     FMT --> OUT[CLI stdout / agent tool result]
+    OUT --> W["episodic_read_window<br/>session_id + source_id + anchor"]
+    W --> S{current source?}
+    S -->|yes| LIVE["getTranscriptContext<br/>privacy-gated live message window"]
+    S -->|no| INDEXED["readIndexedWindow<br/>source-scoped anchor + adjacent chunks"]
+    LIVE --> CONTEXT[bounded context output]
+    INDEXED --> EXCERPTS["renderIndexedContext<br/>labeled, potentially stale excerpts"]
 ```
 
 Design notes on retrieval:
@@ -297,8 +303,10 @@ back to an arbitrary chunk; callers needing the full indexed excerpts must use
 `episodic_read_session(source_id, indexed: true)`. `episodic_read_session`
 retains its full-transcript semantics: it reconstructs from the live source DB
 via `getTranscriptChecked`, falling back to indexed excerpts when requested or
-when the session was deleted (logging first, so structural drift isn't silently
-masked).
+when the session was deleted. Current-source indexed reads still check the raw
+privacy marker before returning cached text, including with `indexed: true`.
+Live-source validation errors are logged and withhold cached content rather than
+silently bypassing the privacy gate. Foreign-source reads depend on source sync.
 
 ## Key design decisions
 

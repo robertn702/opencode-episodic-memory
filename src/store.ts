@@ -452,11 +452,11 @@ export interface IndexedWindowRow {
   text: string;
 }
 
-function indexedWindowBounds(before: number = 3, after: number = 3): { before: number; after: number; limit: number } {
+function indexedWindowBounds(before: number = 3, after: number = 3): { before: number; after: number } {
   if (!Number.isInteger(before) || before < 0 || before > 20 || !Number.isInteger(after) || after < 0 || after > 20) {
     throw new Error("before and after must be non-negative integers no greater than 20.");
   }
-  return { before, after, limit: before + after + 1 };
+  return { before, after };
 }
 
 class LocalIndexStore implements IndexStore {
@@ -495,15 +495,25 @@ class LocalIndexStore implements IndexStore {
   }
   async readIndexedWindow(sessionId: string, anchorMessageId: string, before?: number, after?: number) {
     const bounds = indexedWindowBounds(before, after);
-    return this.db.prepare<IndexedWindowRow, [string, string, string, number, number, number]>(
+    return this.db.prepare<IndexedWindowRow, [string, string, string, number, string, number]>(
       `WITH anchor AS (
         SELECT seq FROM chunks WHERE session_id = ? AND anchor_message_id = ? ORDER BY seq LIMIT 1
+      ), previous AS (
+        SELECT c.seq, c.anchor_message_id, substr(c.text, 1, 4000) AS text
+        FROM chunks c JOIN anchor a
+        WHERE c.session_id = ? AND c.seq < a.seq
+        ORDER BY c.seq DESC LIMIT ?
+      ), following AS (
+        SELECT c.seq, c.anchor_message_id, substr(c.text, 1, 4000) AS text
+        FROM chunks c JOIN anchor a
+        WHERE c.session_id = ? AND c.seq >= a.seq
+        ORDER BY c.seq ASC LIMIT ?
       )
-      SELECT c.seq, c.anchor_message_id, substr(c.text, 1, 4000) AS text
-      FROM chunks c JOIN anchor a
-      WHERE c.session_id = ? AND c.seq BETWEEN a.seq - ? AND a.seq + ?
-      ORDER BY c.seq LIMIT ?`
-    ).all(sessionId, anchorMessageId, sessionId, bounds.before, bounds.after, bounds.limit);
+      SELECT seq, anchor_message_id, text FROM previous
+      UNION ALL
+      SELECT seq, anchor_message_id, text FROM following
+      ORDER BY seq`
+    ).all(sessionId, anchorMessageId, sessionId, bounds.before, sessionId, bounds.after + 1);
   }
   close() { this.db.close(); }
 }
@@ -797,12 +807,22 @@ class RemoteIndexStore implements IndexStore {
         SELECT seq FROM episodic_chunks
         WHERE source_id = ? AND session_id = ? AND anchor_message_id = ?
         ORDER BY seq LIMIT 1
+      ), previous AS (
+        SELECT c.seq, c.anchor_message_id, substr(c.text, 1, 4000) AS text
+        FROM episodic_chunks c JOIN anchor a
+        WHERE c.source_id = ? AND c.session_id = ? AND c.seq < a.seq
+        ORDER BY c.seq DESC LIMIT ?
+      ), following AS (
+        SELECT c.seq, c.anchor_message_id, substr(c.text, 1, 4000) AS text
+        FROM episodic_chunks c JOIN anchor a
+        WHERE c.source_id = ? AND c.session_id = ? AND c.seq >= a.seq
+        ORDER BY c.seq ASC LIMIT ?
       )
-      SELECT c.seq, c.anchor_message_id, substr(c.text, 1, 4000) AS text
-      FROM episodic_chunks c JOIN anchor a
-      WHERE c.source_id = ? AND c.session_id = ? AND c.seq BETWEEN a.seq - ? AND a.seq + ?
-      ORDER BY c.seq LIMIT ?`,
-      args: [sourceId, sessionId, anchorMessageId, sourceId, sessionId, bounds.before, bounds.after, bounds.limit],
+      SELECT seq, anchor_message_id, text FROM previous
+      UNION ALL
+      SELECT seq, anchor_message_id, text FROM following
+      ORDER BY seq`,
+      args: [sourceId, sessionId, anchorMessageId, sourceId, sessionId, bounds.before, sourceId, sessionId, bounds.after + 1],
     });
     return result.rows.map((row) => ({
       seq: rowNumber(row, "seq"), anchor_message_id: rowNullableString(row, "anchor_message_id"), text: rowString(row, "text"),
