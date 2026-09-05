@@ -228,7 +228,7 @@ await expectWindowError({ session_id: "missing", anchor_message_id: "msg_user" }
 await expectWindowError({ session_id: target.id, anchor_message_id: "stale" }, "stale or invalid");
 await expectWindowError({ session_id: target.id, anchor_message_id: "msg_user", before: -1 }, "non-negative integers");
 
-// 4. episodic_read_session (indexed fallback path, no live DB dependency)
+// 4. episodic_read_session (indexed text with a live privacy check)
 const out = await tools.episodic_read_session.execute(
   { session_id: target.id, indexed: true },
   ctx
@@ -245,6 +245,10 @@ privateFixture.run("INSERT INTO part (id, message_id, session_id, time_created, 
 ]);
 privateFixture.close();
 await expectWindowError({ session_id: target.id, anchor_message_id: "msg_user" }, "private");
+const privateIndexed = await tools.episodic_read_session.execute({ session_id: target.id, indexed: true }, ctx);
+if (typeof privateIndexed !== "string" || !privateIndexed.includes("marked private") || privateIndexed.includes("local embeddings")) {
+  throw new Error("harness error: explicit indexed read bypassed the local privacy marker added after sync");
+}
 
 // 5. Remote indexes: foreign sources must use the indexed window, even where
 // their session and anchor IDs collide with the local macOS source.
@@ -286,6 +290,10 @@ const foreignWindow = await remoteTools.episodic_read_window.execute(
 if (typeof foreignWindow !== "string" || !foreignWindow.includes("Indexed excerpts (not a live transcript)") || !foreignWindow.includes("DEV before exchange") || !foreignWindow.includes("DEV after exchange") || !foreignWindow.includes("DEV anchor exchange") || !foreignWindow.includes("... [truncated]") || foreignWindow.includes("MACOS collision content")) {
   throw new Error("harness error: foreign indexed window did not preserve bounded dev-only chunks or truncate output");
 }
+const foreignSession = await remoteTools.episodic_read_session.execute({ session_id: sessionId, source_id: "dev", indexed: true }, ctx);
+if (typeof foreignSession !== "string" || !foreignSession.includes("DEV anchor exchange") || foreignSession.includes("MACOS collision content")) {
+  throw new Error("harness error: foreign indexed session unexpectedly depended on the local source");
+}
 
 async function expectRemoteWindowError(args: { session_id: string; source_id?: string; anchor_message_id: string; before?: number; after?: number }, text: string): Promise<void> {
   try {
@@ -308,6 +316,19 @@ await expectRemoteWindowError({ session_id: sessionId, source_id: "dev", anchor_
 // indexed collision copy.
 process.env.EPISODIC_SOURCE_DB = sourcePath;
 await expectRemoteWindowError({ session_id: sessionId, source_id: "macos", anchor_message_id: "msg_user" }, "private");
+const privateRemoteIndexed = await remoteTools.episodic_read_session.execute({ session_id: sessionId, source_id: "macos", indexed: true }, ctx);
+if (typeof privateRemoteIndexed !== "string" || !privateRemoteIndexed.includes("marked private") || privateRemoteIndexed.includes("MACOS collision content")) {
+  throw new Error("harness error: explicit same-source remote indexed read bypassed the privacy marker");
+}
+const brokenFixture = new Database(sourcePath);
+brokenFixture.run("DROP TABLE part");
+brokenFixture.close();
+for (const indexed of [false, true]) {
+  const withheld = await remoteTools.episodic_read_session.execute({ session_id: sessionId, source_id: "macos", indexed }, ctx);
+  if (typeof withheld !== "string" || !withheld.includes("indexed content withheld") || withheld.includes("MACOS collision content")) {
+    throw new Error("harness error: failed live privacy validation returned cached content");
+  }
+}
 
 // Reject unsupported remote search arguments before opening either the index or
 // embedding backend. An impossible file URL makes accidental I/O fail loudly.

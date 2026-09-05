@@ -103,6 +103,14 @@ describe("store", () => {
       expect((await local.readIndexedWindow("ses_window", "local-max", 20, 20)).map((row) => row.seq)).toEqual(Array.from({ length: 41 }, (_, seq) => seq));
       expect(await local.readIndexedWindow("ses_window", "missing")).toEqual([]);
       expect(await local.readIndexedWindow("missing-session", "local-default")).toEqual([]);
+      await local.replaceSessionChunks({ ...meta, id: "ses_sparse" }, [0, 10, 20, 50].map((seq) => ({
+        seq, time_created: seq, anchor_message_id: seq === 0 ? "local-sparse-start" : seq === 20 ? "local-sparse-middle" : seq === 50 ? "local-sparse-end" : null,
+        text: `local sparse ${seq}`, embedding: new Float32Array([1, 0]),
+      })));
+      expect((await local.readIndexedWindow("ses_sparse", "local-sparse-middle", 1, 1)).map((row) => row.seq)).toEqual([10, 20, 50]);
+      expect((await local.readIndexedWindow("ses_sparse", "local-sparse-start", 20, 20)).map((row) => row.seq)).toEqual([0, 10, 20, 50]);
+      expect((await local.readIndexedWindow("ses_sparse", "local-sparse-end", 20, 20)).map((row) => row.seq)).toEqual([0, 10, 20, 50]);
+      expect((await local.readIndexedWindow("ses_sparse", "local-sparse-middle", 0, 0)).map((row) => row.seq)).toEqual([20]);
       for (const invalid of [NaN, Infinity, -Infinity, 0.5, 21, -1]) {
         await expect(local.readIndexedWindow("ses_window", "local-default", invalid)).rejects.toThrow();
         await expect(local.readIndexedWindow("ses_window", "local-default", 0, invalid)).rejects.toThrow();
@@ -138,6 +146,19 @@ describe("store", () => {
       expect((await desktop.readIndexedWindow("ses_window", "remote-end", undefined, undefined, "desktop")).map((row) => row.seq)).toEqual([47, 48, 49, 50]);
       expect((await laptop.readIndexedWindow("ses_window", "shared-anchor", 1, 1, "desktop")).map((row) => row.seq)).toEqual([0, 1, 2]);
       expect(await laptop.readIndexedWindow("ses_window", "remote-default", 1, 1, "laptop")).toEqual([]);
+      await laptop.replaceSessionChunks({ ...meta, id: "ses_sparse" }, [0, 10, 20, 50].map((seq) => ({
+        seq, time_created: seq, anchor_message_id: seq === 0 ? "sparse-start" : seq === 20 ? "sparse-middle" : seq === 50 ? "sparse-end" : null,
+        text: `laptop sparse ${seq}`, embedding: new Float32Array([1, 0]),
+      })));
+      await desktop.replaceSessionChunks({ ...meta, id: "ses_sparse" }, [0, 10, 20, 50].map((seq) => ({
+        seq, time_created: seq, anchor_message_id: seq === 20 ? "sparse-middle" : null,
+        text: `desktop sparse ${seq}`, embedding: new Float32Array([1, 0]),
+      })));
+      expect((await laptop.readIndexedWindow("ses_sparse", "sparse-middle", 1, 1, "laptop")).map((row) => row.text)).toEqual(["laptop sparse 10", "laptop sparse 20", "laptop sparse 50"]);
+      expect((await laptop.readIndexedWindow("ses_sparse", "sparse-start", 20, 20, "laptop")).map((row) => row.seq)).toEqual([0, 10, 20, 50]);
+      expect((await laptop.readIndexedWindow("ses_sparse", "sparse-end", 20, 20, "laptop")).map((row) => row.seq)).toEqual([0, 10, 20, 50]);
+      expect((await laptop.readIndexedWindow("ses_sparse", "sparse-middle", 0, 0, "laptop")).map((row) => row.seq)).toEqual([20]);
+      expect((await laptop.readIndexedWindow("ses_sparse", "sparse-middle", 1, 1, "desktop")).map((row) => row.text)).toEqual(["desktop sparse 10", "desktop sparse 20", "desktop sparse 50"]);
       await expect(laptop.readIndexedWindow("ses_window", "shared-anchor")).rejects.toThrow("sourceId");
       await expect(laptop.readIndexedWindow("ses_window", "shared-anchor", 0, 0, "")).rejects.toThrow("sourceId");
       for (const invalid of [NaN, Infinity, -Infinity, 0.5, 21, -1]) {

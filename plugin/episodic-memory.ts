@@ -2,7 +2,7 @@
 // - Native tools: episodic_search, episodic_read_window, episodic_read_session
 // - Incremental reindex on session.idle (fire-and-forget, debounced)
 import { type Plugin, tool } from "@opencode-ai/plugin";
-import { openSource, getSession, getTranscriptChecked, getTranscriptContext } from "../src/reader";
+import { openSource, getSession, getTranscriptChecked, getTranscriptContext, transcriptHasMarker } from "../src/reader";
 import { canLiveRead, openConfiguredIndex, remoteIndexConfig, type IndexStore } from "../src/store";
 import { syncSession, syncAll, pruneOrphans } from "../src/indexer";
 import { embedQuery } from "../src/embed";
@@ -170,24 +170,30 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
             throw new Error("source_id is required for episodic_read_session with a remote index.");
           }
           const foreign = !canLiveRead(remote, args.source_id);
-          if (!args.indexed && !foreign) {
+          if (!foreign) {
             try {
               const source = openSource();
-              const s = getSession(source, args.session_id);
-              if (s) {
-                // Privacy gate lives inside getTranscriptChecked (authoritative
-                // raw-blob scan before any read).
-                const checked = getTranscriptChecked(source, args.session_id);
-                if (checked.excluded) {
+              try {
+                // Explicit indexed reads must also respect a marker added since sync.
+                if (transcriptHasMarker(source, args.session_id)) {
                   return "Session is marked private (exclusion marker present); transcript withheld.";
                 }
-                return renderTranscript(s, checked.messages).slice(0, 50000);
+                if (!args.indexed) {
+                  const s = getSession(source, args.session_id);
+                  if (s) {
+                    const checked = getTranscriptChecked(source, args.session_id);
+                    if (checked.excluded) {
+                      return "Session is marked private (exclusion marker present); transcript withheld.";
+                    }
+                    return renderTranscript(s, checked.messages).slice(0, 50000);
+                  }
+                }
+              } finally {
+                source.close();
               }
             } catch (e) {
-              // Log before falling through — a bare swallow would also hide
-              // structural Zod drift, which is meant to be loud.
               await log("warn", `episodic_read_session live-store read failed for ${args.session_id}: ${e}`);
-              // fall through to indexed copy
+              return "Live-source validation failed; indexed content withheld because current privacy status could not be verified.";
             }
           }
           const index = await getIndex();
