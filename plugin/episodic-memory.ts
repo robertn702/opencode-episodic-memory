@@ -6,9 +6,10 @@ import { openSource, getSession, getTranscriptChecked, getTranscriptContext } fr
 import { canLiveRead, openConfiguredIndex, remoteIndexConfig, type IndexStore } from "../src/store";
 import { syncSession, syncAll, pruneOrphans } from "../src/indexer";
 import { embedQuery } from "../src/embed";
-import { parseDateArg, formatHits, renderTranscript, renderTranscriptContext } from "../src/format";
+import { parseDateArg, formatHits, renderTranscript, renderTranscriptContext, renderIndexedContext } from "../src/format";
 
 export const EpisodicMemory: Plugin = async ({ client }) => {
+  const remoteSearch = Boolean(process.env.EPISODIC_INDEX_URL);
   const log = (level: "info" | "warn" | "error", message: string) =>
     client.app
       .log({ body: { service: "episodic-memory", level, message } })
@@ -67,16 +68,22 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
     tool: {
       episodic_search: tool({
         description:
-          "Semantic search over your PAST OpenCode conversations. Use when the user references prior work, past decisions, or previous sessions (e.g. 'how did we handle X', 'the conversation about Y', 'what did we decide about Z'). Returns dated excerpts, session IDs, and anchors. Prefer episodic_search -> episodic_read_window for a bounded live window -> episodic_read_session only when the full session is needed.",
+          "Semantic search over your PAST OpenCode conversations. Use when the user references prior work, past decisions, or previous sessions (e.g. 'how did we handle X', 'the conversation about Y', 'what did we decide about Z'). Returns dated excerpts, session IDs, and anchors. Prefer episodic_search -> episodic_read_window for bounded context -> episodic_read_session only when more context is needed." +
+          (remoteSearch ? " Remote index: vector search only, without text filtering. Preserve source_id when reading hits; foreign-source windows contain indexed excerpts, not live messages." : ""),
         args: {
           query: tool.schema.string().describe("Natural-language description of what you're looking for"),
-          text: tool.schema.string().optional().describe("Exact substring to require in results (ANDed with semantic ranking)"),
-          mode: tool.schema.enum(["vector", "text", "hybrid"]).optional().describe("'vector' (default) semantic search, scores are cosine (~0.4–0.7); 'text' lexical BM25; 'hybrid' fuses both via RRF (may surface lexical noise) — note hybrid hits carry fused RRF scores (~0.03), a DIFFERENT scale from cosine, so don't judge them against the vector thresholds"),
+          ...(!remoteSearch ? { text: tool.schema.string().optional().describe("Exact substring to require in results (ANDed with semantic ranking)") } : {}),
+          mode: tool.schema.enum(remoteSearch ? ["vector"] : ["vector", "text", "hybrid"]).optional().describe(remoteSearch
+            ? "'vector' (default): the only supported remote mode. Scores are cosine (~0.4-0.7)."
+            : "'vector' (default) semantic search, scores are cosine (~0.4–0.7); 'text' lexical BM25; 'hybrid' fuses both via RRF (may surface lexical noise) — note hybrid hits carry fused RRF scores (~0.03), a DIFFERENT scale from cosine, so don't judge them against the vector thresholds"),
           after: tool.schema.string().optional().describe("Only conversations after YYYY-MM-DD"),
           before: tool.schema.string().optional().describe("Only conversations before YYYY-MM-DD"),
           limit: tool.schema.number().optional().describe("Max results, 1-50 (default 10)"),
         },
         async execute(args) {
+          if (remoteIndexConfig() && (args.mode === "text" || args.mode === "hybrid" || args.text !== undefined)) {
+            return 'Remote indexes support vector search only, without text filtering. Retry with mode: "vector" and omit text; include relevant terms in query. Use a local index for exact text filtering, BM25, or hybrid search. No search was run.';
+          }
           const index = await getIndex();
           const after = parseDateArg(args.after);
           if (!after.ok) return after.error;
@@ -86,7 +93,7 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
             limit: Math.min(Math.max(args.limit ?? 10, 1), 50),
             after: after.ms,
             before: before.ms,
-            text: args.text,
+            text: typeof args.text === "string" ? args.text : undefined,
           };
           const noHits = async () => await index.isEmpty()
             ? "No matching past conversations found. The index is empty — run `bun run src/cli.ts sync` to index conversations."
@@ -116,18 +123,26 @@ export const EpisodicMemory: Plugin = async ({ client }) => {
 
       episodic_read_window: tool({
         description:
-          "Read a bounded live-source message window around an anchor from episodic_search. Use the returned session_id and anchor_message_id; this cannot read deleted sessions or indexed-only excerpts.",
+          "Read bounded context around an anchor from episodic_search. Preserve session_id, anchor_message_id, and source_id. Current-source hits use privacy-gated live messages; foreign-source hits use labeled indexed condensed exchanges that may be stale. Missing or stale anchors cannot provide a window; use episodic_read_session with source_id and indexed: true for indexed excerpts instead.",
         args: {
           session_id: tool.schema.string().describe("Session ID from episodic_search, e.g. ses_..."),
           source_id: tool.schema.string().optional().describe("Source ID shown by remote episodic_search results; required for remote indexes"),
           anchor_message_id: tool.schema.string().describe("Anchor message ID from episodic_search"),
-          before: tool.schema.number().optional().describe("Messages before the anchor, 0-20 (default 3)"),
-          after: tool.schema.number().optional().describe("Messages after the anchor, 0-20 (default 3)"),
+          before: tool.schema.number().optional().describe("Messages before the anchor, or indexed chunks for a foreign source, 0-20 (default 3)"),
+          after: tool.schema.number().optional().describe("Messages after the anchor, or indexed chunks for a foreign source, 0-20 (default 3)"),
         },
         async execute(args) {
           const remote = remoteIndexConfig();
-          if (!canLiveRead(remote, args.source_id)) {
-            throw new Error("This indexed hit belongs to another source (or has no source_id). Its excerpt is searchable, but live windows are only available for the current source.");
+          if (remote && !args.source_id) {
+            throw new Error("source_id is required for episodic_read_window with a remote index. Use the source from the search hit.");
+          }
+          if (args.source_id && !canLiveRead(remote, args.source_id)) {
+            const index = await getIndex();
+            const rows = await index.readIndexedWindow(args.session_id, args.anchor_message_id, args.before, args.after, args.source_id);
+            if (rows.length === 0) {
+              throw new Error('No indexed window found for this source, session, and anchor. The anchor may be stale; use episodic_read_session with the same session_id, source_id, and indexed: true for available indexed excerpts.');
+            }
+            return renderIndexedContext(args.session_id, args.source_id, args.anchor_message_id, rows);
           }
           const source = openSource();
           const context = getTranscriptContext(source, args.session_id, args.anchor_message_id, args.before, args.after);

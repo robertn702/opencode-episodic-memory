@@ -266,7 +266,10 @@ Design notes on retrieval:
 - **Remote vector search**: embedding candidates are read in bounded pages and
   scored locally inside one read transaction; only the top-K winners are then
   hydrated in that same snapshot. Text, BM25, and hybrid retrieval remain local
-  features and fail explicitly in remote mode.
+  features and fail explicitly in remote mode. The plugin's mode enum is
+  dynamically vector-only for remote indexes; unsupported remote mode/text
+  requests fail before embedding with actionable guidance, never by silently
+  falling back.
 - **Vector-only by default.** Hybrid (vector + BM25 via RRF) is opt-in:
   empirically, on this corpus BM25 matches injected boilerplate (the `[MEMORY]`
   preamble, tool descriptions) and RRF drags that noise above genuine semantic
@@ -281,13 +284,21 @@ Design notes on retrieval:
   embedding input is further truncated to 2000 chars, where upstream measured
   retrieval quality peaks (the model's window is 512 tokens anyway).
 
-`episodic_read_window` first uses `getTranscriptContext` to validate a bounded
-message window and its source anchor through the same privacy gate. It is
-live-source only, so deleted, private, and stale anchors fail clearly rather
-than falling back to indexed text. `episodic_read_session` retains its full-transcript
-semantics: it reconstructs from the live source DB via `getTranscriptChecked`,
-falling back to indexed excerpts if the session was deleted (logging first, so
-structural drift isn't silently masked).
+`episodic_read_window` requires `source_id` for remote indexes. For the current
+source it uses `getTranscriptContext` to validate the same privacy-gated bounded
+message window as before. For a foreign remote source it selects bounded
+indexed condensed exchanges around the existing `anchor_message_id` (the
+`before`/`after` values count chunks there, versus messages locally), labels the
+result as indexed excerpts rather than a live transcript, fetches at most 41
+chunks with 4000 SQL characters each, and renders up to 600 UTF-8 bytes per chunk. Foreign indexes may
+be stale until that source syncs and provide no live privacy or freshness
+guarantees across devices. A missing, null, or stale foreign anchor cannot fall
+back to an arbitrary chunk; callers needing the full indexed excerpts must use
+`episodic_read_session(source_id, indexed: true)`. `episodic_read_session`
+retains its full-transcript semantics: it reconstructs from the live source DB
+via `getTranscriptChecked`, falling back to indexed excerpts when requested or
+when the session was deleted (logging first, so structural drift isn't silently
+masked).
 
 ## Key design decisions
 

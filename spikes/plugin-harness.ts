@@ -5,7 +5,13 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
+// Do this before importing or constructing the plugin: this workstation may
+// have a real remote index configured, which the harness must never touch.
+delete process.env.EPISODIC_INDEX_URL;
+delete process.env.EPISODIC_SOURCE_ID;
+delete process.env.EPISODIC_INDEX_AUTH_TOKEN;
 const harnessDir = mkdtempSync(join(tmpdir(), "episodic-harness-"));
 const sourcePath = join(harnessDir, "opencode.db");
 process.env.EPISODIC_SOURCE_DB = sourcePath;
@@ -80,8 +86,7 @@ fixture.run(
 );
 fixture.close();
 
-import EpisodicMemory from "../plugin/episodic-memory";
-import type { PluginInput, ToolContext } from "@opencode-ai/plugin";
+import { tool, type PluginInput, type ToolContext, type ToolDefinition } from "@opencode-ai/plugin";
 
 // The plugin only reads client.app.log; the rest of PluginInput is a large
 // generated SDK surface we don't reconstruct here. Structurally typed (not any).
@@ -100,6 +105,7 @@ const mockClient = {
 // PluginInput. Widen the minimal stub once — the only assertion in this harness.
 const mockInput = { client: mockClient } as unknown as PluginInput;
 
+const { default: EpisodicMemory } = await import("../plugin/episodic-memory");
 const hooks = await EpisodicMemory(mockInput);
 
 console.log("hooks registered:", Object.keys(hooks));
@@ -112,6 +118,24 @@ const actualToolNames = Object.keys(tools).sort();
 if (actualToolNames.join(",") !== expectedToolNames.join(",")) {
   throw new Error(`harness error: unexpected public tools (got: ${actualToolNames.join(", ") || "none"})`);
 }
+
+function assertSearchSchema(
+  searchTool: ToolDefinition,
+  expectedModes: string[],
+  hasText: boolean,
+): void {
+  const { args } = searchTool;
+  const mode = args.mode;
+  if (!mode || expectedModes.some((value) => !tool.schema.safeParse(mode, value).success)) {
+    throw new Error(`harness error: episodic_search schema did not accept ${expectedModes.join(", ")}`);
+  }
+  const rejected = ["vector", "text", "hybrid", "invalid"].filter((value) => !expectedModes.includes(value));
+  if (rejected.some((value) => tool.schema.safeParse(mode, value).success) || ("text" in args) !== hasText) {
+    throw new Error("harness error: episodic_search schema exposed the wrong remote/local modes or text field");
+  }
+}
+
+assertSearchSchema(tools.episodic_search, ["vector", "text", "hybrid"], true);
 
 // A minimal but complete ToolContext for invoking tools directly.
 const ctx: ToolContext = {
@@ -221,6 +245,86 @@ privateFixture.run("INSERT INTO part (id, message_id, session_id, time_created, 
 ]);
 privateFixture.close();
 await expectWindowError({ session_id: target.id, anchor_message_id: "msg_user" }, "private");
+
+// 5. Remote indexes: foreign sources must use the indexed window, even where
+// their session and anchor IDs collide with the local macOS source.
+const { openConfiguredIndex } = await import("../src/store");
+const remoteIndexPath = join(harnessDir, "remote-index.db");
+process.env.EPISODIC_INDEX_URL = pathToFileURL(remoteIndexPath).href;
+process.env.EPISODIC_SOURCE_ID = "dev";
+const devIndex = await openConfiguredIndex();
+await devIndex.replaceSessionChunks(
+  { id: sessionId, project_id: "proj_dev", parent_id: null, title: "Dev fixture", directory: "/dev", time_created: created, source_time_updated: created },
+  [
+    { seq: 0, time_created: created, anchor_message_id: "msg_before", text: "DEV before exchange", embedding: new Float32Array([1, 0]) },
+    { seq: 1, time_created: created + 1, anchor_message_id: "msg_user", text: `DEV anchor exchange ${"x".repeat(700)}`, embedding: new Float32Array([1, 0]) },
+    { seq: 2, time_created: created + 2, anchor_message_id: "msg_assistant", text: "DEV after exchange", embedding: new Float32Array([1, 0]) },
+  ],
+);
+devIndex.close();
+
+process.env.EPISODIC_SOURCE_ID = "macos";
+const macosIndex = await openConfiguredIndex();
+await macosIndex.replaceSessionChunks(
+  { id: sessionId, project_id: "proj_macos", parent_id: null, title: "macOS fixture", directory: "/macos", time_created: created, source_time_updated: created },
+  [{ seq: 0, time_created: created, anchor_message_id: "msg_user", text: "MACOS collision content", embedding: new Float32Array([0, 1]) }],
+);
+macosIndex.close();
+
+const remoteHooks = await EpisodicMemory(mockInput);
+if (!remoteHooks.tool) throw new Error("harness error: remote plugin registered no tools");
+const remoteTools = remoteHooks.tool;
+assertSearchSchema(remoteTools.episodic_search, ["vector"], false);
+
+const blockedSourceParent = join(harnessDir, "blocked-source");
+writeFileSync(blockedSourceParent, "blocked");
+process.env.EPISODIC_SOURCE_DB = join(blockedSourceParent, "opencode.db");
+const foreignWindow = await remoteTools.episodic_read_window.execute(
+  { session_id: sessionId, source_id: "dev", anchor_message_id: "msg_user", before: 1, after: 1 },
+  ctx,
+);
+if (typeof foreignWindow !== "string" || !foreignWindow.includes("Indexed excerpts (not a live transcript)") || !foreignWindow.includes("DEV before exchange") || !foreignWindow.includes("DEV after exchange") || !foreignWindow.includes("DEV anchor exchange") || !foreignWindow.includes("... [truncated]") || foreignWindow.includes("MACOS collision content")) {
+  throw new Error("harness error: foreign indexed window did not preserve bounded dev-only chunks or truncate output");
+}
+
+async function expectRemoteWindowError(args: { session_id: string; source_id?: string; anchor_message_id: string; before?: number; after?: number }, text: string): Promise<void> {
+  try {
+    await remoteTools.episodic_read_window.execute(args, ctx);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes(text)) return;
+    throw error;
+  }
+  throw new Error(`harness error: expected remote episodic_read_window error containing ${text}`);
+}
+
+await expectRemoteWindowError({ session_id: "missing", source_id: "dev", anchor_message_id: "msg_user" }, "No indexed window");
+await expectRemoteWindowError({ session_id: sessionId, source_id: "dev", anchor_message_id: "stale" }, "stale");
+await expectRemoteWindowError({ session_id: sessionId, anchor_message_id: "msg_user" }, "source_id is required");
+await expectRemoteWindowError({ session_id: sessionId, source_id: "", anchor_message_id: "msg_user" }, "source_id is required");
+await expectRemoteWindowError({ session_id: sessionId, source_id: "dev", anchor_message_id: "msg_user", before: -1 }, "non-negative integers");
+
+// Restore the live source only after proving the foreign read never opened it.
+// Same-source reads remain privacy-gated and must not fall through to macOS's
+// indexed collision copy.
+process.env.EPISODIC_SOURCE_DB = sourcePath;
+await expectRemoteWindowError({ session_id: sessionId, source_id: "macos", anchor_message_id: "msg_user" }, "private");
+
+// Reject unsupported remote search arguments before opening either the index or
+// embedding backend. An impossible file URL makes accidental I/O fail loudly.
+process.env.EPISODIC_INDEX_URL = pathToFileURL(join(blockedSourceParent, "unopenable-index.db")).href;
+const blockedRemoteHooks = await EpisodicMemory(mockInput);
+if (!blockedRemoteHooks.tool) throw new Error("harness error: blocked remote plugin registered no tools");
+const blockedSearch = blockedRemoteHooks.tool.episodic_search;
+for (const args of [
+  { query: "test", mode: "text" },
+  { query: "test", mode: "hybrid" },
+  { query: "test", text: "exact" },
+]) {
+  const guidance = await blockedSearch.execute(args, ctx);
+  if (typeof guidance !== "string" || !guidance.includes('Retry with mode: "vector"') || !guidance.includes("No search was run.")) {
+    throw new Error("harness error: unsupported remote search did not return no-I/O retry guidance");
+  }
+}
 
 console.log("\nPlugin harness OK.");
 process.exit(0);
