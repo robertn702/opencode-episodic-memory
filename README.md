@@ -107,9 +107,9 @@ of day D; `--before D` is exclusive of day D (i.e. up to the start of that day).
 
 ## Agent tools
 
-- **`episodic_search`** — `query` (+ optional `text`, `mode: vector|text|hybrid`, `after`, `before`, `limit`). `vector` (default) is semantic; `text` is lexical BM25; `hybrid` fuses both via RRF (opt-in — can surface lexical noise). Returns dated excerpts with session IDs, scores, and message anchors. Legacy results without an anchor require a normal sync before bounded window reads.
-- **`episodic_read_window`** — `session_id`, `anchor_message_id` (+ optional `source_id`, required in remote mode; `before`, `after`, each 0-20, default 3). Reads a bounded chronological window from the privacy-gated live source transcript. Deleted, private, stale, or legacy-anchored sessions cannot provide a window.
-- **`episodic_read_session`** — `session_id` (+ optional `source_id`, required in remote mode; `indexed`). Reads the full session transcript from the live store, falling back to indexed excerpts. Prefer `episodic_search` -> `episodic_read_window` -> `episodic_read_session`, stopping once enough context has been recovered.
+- **`episodic_search`** — `query` (+ optional `text`, `mode: vector|text|hybrid`, `after`, `before`, `limit`). `vector` (default) is semantic; `text` is lexical BM25; `hybrid` fuses both via RRF (opt-in — can surface lexical noise). Returns dated excerpts with session IDs, scores, and message anchors. Remote indexes are vector-only: the plugin exposes only `vector` there, and explicit remote `text`/`hybrid` requests fail before embedding with actionable guidance rather than silently falling back. Local text/hybrid behavior is unchanged.
+- **`episodic_read_window`** — `session_id`, `anchor_message_id` (+ optional `source_id`, required for remote indexes; `before`, `after`, each 0-20, default 3). Current-source hits use privacy-gated live messages. Foreign-source hits use labeled indexed exchanges around the anchor, with before/after counting chunks instead of messages and each chunk rendered at up to 600 UTF-8 bytes. Missing or stale anchors cannot expand; use `episodic_read_session` with the same session/source and `indexed: true` for available indexed excerpts.
+- **`episodic_read_session`** — `session_id` (+ optional `source_id`, required for remote indexes; `indexed`). Reads the full session transcript from the live store, falling back to indexed excerpts when explicitly requested or when the live session is unavailable. Prefer `episodic_search` -> `episodic_read_window` -> `episodic_read_session`, stopping once enough context has been recovered.
 
 ## Excluding conversations
 
@@ -175,9 +175,13 @@ schema and does not use FTS, so remote mode supports vector search only. `--text
 Remote cosine search reads embedding candidates in bounded pages and hydrates
 only the final result set.
 
-Remote search includes the source ID in each hit. Bounded live reads are only
-valid for the current source; another device's hits remain available as indexed
-excerpts through `episodic_read_session` with that hit's `source_id`.
+Remote search includes the source ID in each hit. `source_id` is required for
+remote indexed reads. Another device's hit can be read through the bounded
+indexed foreign-source path in `episodic_read_window` when its anchor is
+present and current; otherwise use `episodic_read_session` with
+`indexed: true`. These are condensed indexed excerpts, not a live transcript;
+indexes remain stale until the source syncs and carry no live privacy or
+freshness guarantees across devices.
 
 Network failures are surfaced by the CLI and doctor; plugin background reindex
 logs failures and never silently falls back to a local index (which would split

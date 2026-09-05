@@ -2,7 +2,7 @@
 // parsing, date formatting, transcript→markdown, and search-hit formatting live
 // here so the two front-ends can't drift apart.
 import type { SourceMessage } from "./reader";
-import type { SearchHit } from "./store";
+import type { IndexedWindowRow, SearchHit } from "./store";
 import { Buffer } from "node:buffer";
 
 const MAX_CONTEXT_BODY_BYTES = 600;
@@ -82,6 +82,20 @@ export function renderTranscriptContext(
     if (tools.length) lines.push(truncateContext(`*(tools: ${tools.join(", ")})*`, MAX_CONTEXT_TOOLS_BYTES));
     if (message.contextPartsOmitted) lines.push(`*(${message.contextPartsOmitted} parts omitted from bounded context)*`);
     lines.push("");
+  }
+  return lines.join("\n");
+}
+
+export function renderIndexedContext(sessionId: string, sourceId: string, anchorMessageId: string, rows: IndexedWindowRow[]): string {
+  const lines = [
+    "# Indexed excerpts (not a live transcript)",
+    `source: ${truncateContext(sourceId, MAX_CONTEXT_FIELD_BYTES)}  session: ${truncateContext(sessionId, MAX_CONTEXT_FIELD_BYTES)}`,
+    "Window bounds count condensed exchange chunks, not messages. Content may be stale until the source syncs.",
+    "",
+  ];
+  for (const row of rows) {
+    lines.push(`## Chunk ${row.seq}${row.anchor_message_id === anchorMessageId ? " (anchor)" : ""}`);
+    lines.push(truncateContext(row.text, MAX_CONTEXT_BODY_BYTES), "");
   }
   return lines.join("\n");
 }

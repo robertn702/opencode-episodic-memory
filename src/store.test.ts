@@ -87,6 +87,74 @@ describe("store", () => {
     }
   });
 
+  test("indexed windows are bounded, anchored, and source-scoped", async () => {
+    const local = localIndexStore(openIndex(join(dir, "window-local.db")));
+    try {
+      await local.replaceSessionChunks({ ...meta, id: "ses_window" }, Array.from({ length: 51 }, (_, seq) => ({
+        seq, time_created: seq, anchor_message_id: seq === 0 ? "local-start" : seq === 3 ? "local-default" : seq === 10 || seq === 11 ? "local-duplicate" : seq === 20 ? "local-max" : seq === 50 ? "local-end" : null,
+        text: seq === 3 ? "x".repeat(5_000) : `local ${seq}`,
+        embedding: new Float32Array([1, 0]),
+      })));
+      expect((await local.readIndexedWindow("ses_window", "local-default")).map((row) => row.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+      expect((await local.readIndexedWindow("ses_window", "local-default"))[3].text).toHaveLength(4_000);
+      expect((await local.readIndexedWindow("ses_window", "local-start", 20, 20)).map((row) => row.seq)).toEqual(Array.from({ length: 21 }, (_, seq) => seq));
+      expect((await local.readIndexedWindow("ses_window", "local-end")).map((row) => row.seq)).toEqual([47, 48, 49, 50]);
+      expect((await local.readIndexedWindow("ses_window", "local-duplicate", 0, 0)).map((row) => row.seq)).toEqual([10]);
+      expect((await local.readIndexedWindow("ses_window", "local-max", 20, 20)).map((row) => row.seq)).toEqual(Array.from({ length: 41 }, (_, seq) => seq));
+      expect(await local.readIndexedWindow("ses_window", "missing")).toEqual([]);
+      expect(await local.readIndexedWindow("missing-session", "local-default")).toEqual([]);
+      for (const invalid of [NaN, Infinity, -Infinity, 0.5, 21, -1]) {
+        await expect(local.readIndexedWindow("ses_window", "local-default", invalid)).rejects.toThrow();
+        await expect(local.readIndexedWindow("ses_window", "local-default", 0, invalid)).rejects.toThrow();
+      }
+    } finally {
+      local.close();
+    }
+
+    const original = { url: process.env.EPISODIC_INDEX_URL, source: process.env.EPISODIC_SOURCE_ID, token: process.env.EPISODIC_INDEX_AUTH_TOKEN };
+    let laptop: Awaited<ReturnType<typeof openConfiguredIndex>> | undefined;
+    let desktop: Awaited<ReturnType<typeof openConfiguredIndex>> | undefined;
+    try {
+      process.env.EPISODIC_INDEX_URL = `file:${join(dir, "window-remote.db")}`;
+      delete process.env.EPISODIC_INDEX_AUTH_TOKEN;
+      process.env.EPISODIC_SOURCE_ID = "laptop";
+      laptop = await openConfiguredIndex();
+      await laptop.replaceSessionChunks({ ...meta, id: "ses_window" }, [
+        { seq: 0, time_created: 0, anchor_message_id: null, text: "laptop before", embedding: new Float32Array([1, 0]) },
+        { seq: 1, time_created: 1, anchor_message_id: "shared-anchor", text: "laptop anchor", embedding: new Float32Array([1, 0]) },
+        { seq: 2, time_created: 2, anchor_message_id: null, text: "laptop after", embedding: new Float32Array([1, 0]) },
+      ]);
+      process.env.EPISODIC_SOURCE_ID = "desktop";
+      desktop = await openConfiguredIndex();
+      await desktop.replaceSessionChunks({ ...meta, id: "ses_window" }, Array.from({ length: 51 }, (_, seq) => ({
+        seq, time_created: seq, anchor_message_id: seq === 0 ? "remote-start" : seq === 1 ? "shared-anchor" : seq === 3 ? "remote-default" : seq === 20 ? "remote-max" : seq === 50 ? "remote-end" : null,
+        text: seq === 3 ? "r".repeat(5_000) : `desktop ${seq}`, embedding: new Float32Array([1, 0]),
+      })));
+      expect((await laptop.readIndexedWindow("ses_window", "shared-anchor", 1, 1, "laptop")).map((row) => row.text)).toEqual(["laptop before", "laptop anchor", "laptop after"]);
+      expect((await desktop.readIndexedWindow("ses_window", "remote-default", 3, 3, "desktop"))[3].text).toHaveLength(4_000);
+      expect((await desktop.readIndexedWindow("ses_window", "remote-default", undefined, undefined, "desktop")).map((row) => row.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+      expect((await desktop.readIndexedWindow("ses_window", "remote-start", 20, 20, "desktop")).map((row) => row.seq)).toEqual(Array.from({ length: 21 }, (_, seq) => seq));
+      expect((await desktop.readIndexedWindow("ses_window", "remote-max", 20, 20, "desktop")).map((row) => row.seq)).toEqual(Array.from({ length: 41 }, (_, seq) => seq));
+      expect((await desktop.readIndexedWindow("ses_window", "remote-end", undefined, undefined, "desktop")).map((row) => row.seq)).toEqual([47, 48, 49, 50]);
+      expect((await laptop.readIndexedWindow("ses_window", "shared-anchor", 1, 1, "desktop")).map((row) => row.seq)).toEqual([0, 1, 2]);
+      expect(await laptop.readIndexedWindow("ses_window", "remote-default", 1, 1, "laptop")).toEqual([]);
+      await expect(laptop.readIndexedWindow("ses_window", "shared-anchor")).rejects.toThrow("sourceId");
+      await expect(laptop.readIndexedWindow("ses_window", "shared-anchor", 0, 0, "")).rejects.toThrow("sourceId");
+      for (const invalid of [NaN, Infinity, -Infinity, 0.5, 21, -1]) {
+        await expect(desktop.readIndexedWindow("ses_window", "remote-default", invalid, 0, "desktop")).rejects.toThrow();
+        await expect(desktop.readIndexedWindow("ses_window", "remote-default", 0, invalid, "desktop")).rejects.toThrow();
+      }
+      await laptop.removeSession("ses_window");
+      expect(await laptop.readIndexedWindow("ses_window", "shared-anchor", 1, 1, "laptop")).toEqual([]);
+    } finally {
+      laptop?.close();
+      desktop?.close();
+      if (original.url === undefined) delete process.env.EPISODIC_INDEX_URL; else process.env.EPISODIC_INDEX_URL = original.url;
+      if (original.source === undefined) delete process.env.EPISODIC_SOURCE_ID; else process.env.EPISODIC_SOURCE_ID = original.source;
+      if (original.token === undefined) delete process.env.EPISODIC_INDEX_AUTH_TOKEN; else process.env.EPISODIC_INDEX_AUTH_TOKEN = original.token;
+    }
+  });
+
   test("remote search paginates candidates before hydrating winners", async () => {
     const original = { url: process.env.EPISODIC_INDEX_URL, source: process.env.EPISODIC_SOURCE_ID, token: process.env.EPISODIC_INDEX_AUTH_TOKEN };
     try {

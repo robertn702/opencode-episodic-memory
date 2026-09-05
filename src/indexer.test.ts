@@ -45,6 +45,7 @@ describe("syncSession remote privacy", () => {
       async isEmpty() { return false; },
       async stats() { return { sessions: 0, excluded: 0, chunks: 0, oldest: null, newest: null, byDirectory: [] }; },
       async readIndexed() { return []; },
+      async readIndexedWindow() { return []; },
       close() {},
     } satisfies IndexStore;
     const session = { id: "ses_race", project_id: "project", parent_id: null, title: "Race", directory: "/tmp", time_created: 1, time_updated: 1 };

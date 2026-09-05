@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
-import { renderTranscriptContext } from "./format";
+import { renderIndexedContext, renderTranscriptContext } from "./format";
 import type { SourceMessage } from "./reader";
 
 describe("renderTranscriptContext", () => {
@@ -42,6 +42,24 @@ describe("renderTranscriptContext", () => {
     expect(Buffer.byteLength(output, "utf8")).toBeLessThan(50_000);
     expect(output).toContain("21/41 (anchor)");
     expect(output).toContain("following message");
+    expect(output).not.toContain("\uFFFD");
+  });
+});
+
+describe("renderIndexedContext", () => {
+  test("labels indexed chunks and bounds multibyte output without losing the anchor", () => {
+    const multibyte = "界😀".repeat(2_000);
+    const output = renderIndexedContext(`ses_${multibyte}`, `dev_${multibyte}`, "msg_anchor", Array.from({ length: 41 }, (_, seq) => ({
+      seq,
+      anchor_message_id: seq === 20 ? "msg_anchor" : null,
+      text: `${seq === 21 ? "following exchange" : "exchange"} ${multibyte}`,
+    })));
+    expect(output).toContain("Indexed excerpts (not a live transcript)");
+    expect(output).toContain("may be stale");
+    expect(output).toContain("Chunk 20 (anchor)");
+    expect(output).toContain("following exchange");
+    expect(output).toContain("... [truncated]");
+    expect(Buffer.byteLength(output, "utf8")).toBeLessThan(30_000);
     expect(output).not.toContain("\uFFFD");
   });
 });

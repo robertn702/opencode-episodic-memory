@@ -442,7 +442,21 @@ export interface IndexStore {
   isEmpty(): Promise<boolean>;
   stats(): Promise<IndexStats>;
   readIndexed(sessionId: string, sourceId?: string): Promise<{ text: string }[]>;
+  readIndexedWindow(sessionId: string, anchorMessageId: string, before?: number, after?: number, sourceId?: string): Promise<IndexedWindowRow[]>;
   close(): void;
+}
+
+export interface IndexedWindowRow {
+  seq: number;
+  anchor_message_id: string | null;
+  text: string;
+}
+
+function indexedWindowBounds(before: number = 3, after: number = 3): { before: number; after: number; limit: number } {
+  if (!Number.isInteger(before) || before < 0 || before > 20 || !Number.isInteger(after) || after < 0 || after > 20) {
+    throw new Error("before and after must be non-negative integers no greater than 20.");
+  }
+  return { before, after, limit: before + after + 1 };
 }
 
 class LocalIndexStore implements IndexStore {
@@ -478,6 +492,18 @@ class LocalIndexStore implements IndexStore {
   async stats() { return stats(this.db); }
   async readIndexed(sessionId: string) {
     return this.db.prepare<{ text: string }, [string]>("SELECT text FROM chunks WHERE session_id = ? ORDER BY seq").all(sessionId);
+  }
+  async readIndexedWindow(sessionId: string, anchorMessageId: string, before?: number, after?: number) {
+    const bounds = indexedWindowBounds(before, after);
+    return this.db.prepare<IndexedWindowRow, [string, string, string, number, number, number]>(
+      `WITH anchor AS (
+        SELECT seq FROM chunks WHERE session_id = ? AND anchor_message_id = ? ORDER BY seq LIMIT 1
+      )
+      SELECT c.seq, c.anchor_message_id, substr(c.text, 1, 4000) AS text
+      FROM chunks c JOIN anchor a
+      WHERE c.session_id = ? AND c.seq BETWEEN a.seq - ? AND a.seq + ?
+      ORDER BY c.seq LIMIT ?`
+    ).all(sessionId, anchorMessageId, sessionId, bounds.before, bounds.after, bounds.limit);
   }
   close() { this.db.close(); }
 }
@@ -762,6 +788,25 @@ class RemoteIndexStore implements IndexStore {
   async readIndexed(sessionId: string, sourceId: string = this.sourceId): Promise<{ text: string }[]> {
     const result = await this.client.execute({ sql: "SELECT text FROM episodic_chunks WHERE source_id = ? AND session_id = ? ORDER BY seq", args: [sourceId, sessionId] });
     return result.rows.map((row) => ({ text: rowString(row, "text") }));
+  }
+  async readIndexedWindow(sessionId: string, anchorMessageId: string, before?: number, after?: number, sourceId?: string): Promise<IndexedWindowRow[]> {
+    if (!sourceId) throw new Error("sourceId is required for remote indexed windows.");
+    const bounds = indexedWindowBounds(before, after);
+    const result = await this.client.execute({
+      sql: `WITH anchor AS (
+        SELECT seq FROM episodic_chunks
+        WHERE source_id = ? AND session_id = ? AND anchor_message_id = ?
+        ORDER BY seq LIMIT 1
+      )
+      SELECT c.seq, c.anchor_message_id, substr(c.text, 1, 4000) AS text
+      FROM episodic_chunks c JOIN anchor a
+      WHERE c.source_id = ? AND c.session_id = ? AND c.seq BETWEEN a.seq - ? AND a.seq + ?
+      ORDER BY c.seq LIMIT ?`,
+      args: [sourceId, sessionId, anchorMessageId, sourceId, sessionId, bounds.before, bounds.after, bounds.limit],
+    });
+    return result.rows.map((row) => ({
+      seq: rowNumber(row, "seq"), anchor_message_id: rowNullableString(row, "anchor_message_id"), text: rowString(row, "text"),
+    }));
   }
   close() { this.client.close(); }
 }
