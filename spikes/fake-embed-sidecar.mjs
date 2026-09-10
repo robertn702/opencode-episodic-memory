@@ -24,6 +24,27 @@ function vector(text, index) {
 }
 
 log({ event: "start", pid: process.pid });
+let stopping = false;
+function stop(signal) {
+  if (stopping) return;
+  stopping = true;
+  log({ event: "stopping", pid: process.pid, signal });
+  const delay = Number(process.env.EPISODIC_TEST_SIDECAR_DELAY_EXIT_MS ?? 0);
+  setTimeout(() => {
+    log({ event: "exit", pid: process.pid, signal });
+    process.exit(0);
+  }, Number.isSafeInteger(delay) && delay >= 0 ? delay : 0);
+}
+process.on("SIGTERM", () => {
+  const ignoreOncePath = process.env.EPISODIC_TEST_SIDECAR_IGNORE_SIGTERM_ONCE;
+  if (process.env.EPISODIC_TEST_SIDECAR_IGNORE_SIGTERM === "1" || (ignoreOncePath && !existsSync(ignoreOncePath))) {
+    if (ignoreOncePath) writeFileSync(ignoreOncePath, "ignored");
+    log({ event: "ignored-sigterm", pid: process.pid });
+    return;
+  }
+  stop("SIGTERM");
+});
+process.on("SIGINT", () => stop("SIGINT"));
 const startupMode = process.env.EPISODIC_TEST_SIDECAR_STARTUP_MODE;
 let ignoreRequests = false;
 if (startupMode === "never-ready") {
@@ -36,8 +57,11 @@ if (startupMode === "never-ready") {
   ignoreRequests = true;
   send({ ready: true });
   setTimeout(() => process.exit(7), 5);
+} else if (startupMode === "ready-then-invalid") {
+  process.stdout.write('{"ready":true}\nnot-json\n');
 } else {
-  send({ ready: true });
+  const readyDelay = Number(process.env.EPISODIC_TEST_SIDECAR_READY_DELAY_MS ?? 0);
+  setTimeout(() => send({ ready: true }), Number.isSafeInteger(readyDelay) && readyDelay >= 0 ? readyDelay : 0);
 }
 
 let remainder = "";

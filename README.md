@@ -18,7 +18,7 @@ of the OpenCode memory-plugin landscape? See
 
 1. **Read** — sessions/messages/parts from OpenCode's `~/.local/share/opencode/opencode.db` (read-only)
 2. **Parse** — condensed exchanges (user text, assistant text, tool names; no reasoning blobs or tool output)
-3. **Embed** — local, offline embeddings via Transformers.js in a persistent system-Node sidecar (`Snowflake/snowflake-arctic-embed-m-v1.5` q8, 768 dims; retrieval prefix on search queries). Chosen by empirical eval on a real corpus — see [docs/embedding-model-eval.md](docs/embedding-model-eval.md)
+3. **Embed** — local, offline embeddings via Transformers.js in a lazily started, idle-evictable system-Node sidecar (`Snowflake/snowflake-arctic-embed-m-v1.5` q8, 768 dims; retrieval prefix on search queries). Chosen by empirical eval on a real corpus — see [docs/embedding-model-eval.md](docs/embedding-model-eval.md)
 4. **Index** — plain SQLite at `~/.local/share/opencode-episodic-memory/index.db` by default; optional libSQL/Turso remote storage can combine source-scoped indexes across devices
 5. **Recall** — native plugin tools `episodic_search` / `episodic_read_window` / `episodic_read_session`, plus a `remembering-conversations` skill that teaches the agent when to search
 6. **Stay fresh** — the plugin re-indexes each session on the `session.idle` event
@@ -55,7 +55,10 @@ Or edit `~/.config/opencode/opencode.json` manually:
 Default sidecar-mode semantic indexing and vector/hybrid search require a system
 **Node 20+** binary (`node` by default). The first embedding run downloads the
 model (~100 MB, cached afterward). The model and its native runtime live in
-that Node sidecar, not inside OpenCode's Bun/TUI process. Explicit
+that Node sidecar, not inside OpenCode's Bun/TUI process. The warm sidecar is
+stopped after its configured idle timeout to release model memory; the next
+embedding request starts a fresh child and reloads the cached model, so the
+first request after idle eviction has model-loading latency. Explicit
 `EPISODIC_EMBED_MODE=inline` works without Node but is unsafe in affected
 OpenCode/Bun versions. `episodic_read_window`, `episodic_read_session`, and lexical text search also remain
 available without Node.
@@ -139,6 +142,7 @@ instruction-tag match — the intent is the same, but our matching is literal.
 | `EPISODIC_EMBED_BATCH_SIZE` | `32` | Texts per sidecar request (1-64) |
 | `EPISODIC_EMBED_READY_TIMEOUT_MS` | `600000` | Maximum wait for sidecar/model startup |
 | `EPISODIC_EMBED_REQUEST_TIMEOUT_MS` | `120000` | Maximum wait for a post-startup embedding request |
+| `EPISODIC_EMBED_IDLE_TIMEOUT_MS` | `300000` | Stop an idle sidecar after this many milliseconds; `0` disables idle eviction |
 
 `EPISODIC_EMBED_MODE=inline` loads Transformers.js native addons directly in
 OpenCode's embedded Bun process. It exists only as an explicit compatibility
@@ -146,6 +150,13 @@ escape hatch and is unsafe with affected OpenCode/Bun releases that can crash
 during native-addon teardown. It is never selected automatically if sidecar
 startup fails. Run `bun run src/cli.ts doctor` to diagnose the selected mode,
 Node version, and a real embedding.
+
+The sidecar idle timer starts only after initialization and all embedding work
+has completed. Startup, queued requests, in-flight work, and sequential batches
+keep it alive. Background indexing counts as embedding activity. Invalid timeout
+settings fail before a sidecar is spawned; the timer is unref'd so it does not
+keep the CLI running. Idle eviction reduces retained idle memory, but does not
+cap memory across simultaneously active runtimes.
 
 ### Optional shared remote index
 

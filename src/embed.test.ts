@@ -17,11 +17,16 @@ const controlledEnvironment = [
   "EPISODIC_EMBED_BATCH_SIZE",
   "EPISODIC_EMBED_READY_TIMEOUT_MS",
   "EPISODIC_EMBED_REQUEST_TIMEOUT_MS",
+  "EPISODIC_EMBED_IDLE_TIMEOUT_MS",
   "EPISODIC_TEST_SIDECAR_LOG",
   "EPISODIC_TEST_SIDECAR_EXIT_ONCE",
   "EPISODIC_TEST_SIDECAR_STARTUP_ONCE",
   "EPISODIC_TEST_SIDECAR_STARTUP_MODE",
   "EPISODIC_TEST_SIDECAR_REQUEST_MODE",
+  "EPISODIC_TEST_SIDECAR_DELAY_EXIT_MS",
+  "EPISODIC_TEST_SIDECAR_READY_DELAY_MS",
+  "EPISODIC_TEST_SIDECAR_IGNORE_SIGTERM",
+  "EPISODIC_TEST_SIDECAR_IGNORE_SIGTERM_ONCE",
 ] as const;
 const originalEnvironment = new Map(controlledEnvironment.map((name) => [name, process.env[name]]));
 
@@ -30,11 +35,16 @@ process.env.EPISODIC_EMBED_MODE = "sidecar";
 process.env.EPISODIC_EMBED_BATCH_SIZE = "32";
 process.env.EPISODIC_EMBED_READY_TIMEOUT_MS = "2000";
 process.env.EPISODIC_EMBED_REQUEST_TIMEOUT_MS = "2000";
+process.env.EPISODIC_EMBED_IDLE_TIMEOUT_MS = "300000";
 process.env.EPISODIC_TEST_SIDECAR_LOG = logPath;
 process.env.EPISODIC_TEST_SIDECAR_EXIT_ONCE = exitOncePath;
 process.env.EPISODIC_TEST_SIDECAR_STARTUP_ONCE = startupOncePath;
 delete process.env.EPISODIC_TEST_SIDECAR_STARTUP_MODE;
 delete process.env.EPISODIC_TEST_SIDECAR_REQUEST_MODE;
+delete process.env.EPISODIC_TEST_SIDECAR_DELAY_EXIT_MS;
+delete process.env.EPISODIC_TEST_SIDECAR_READY_DELAY_MS;
+delete process.env.EPISODIC_TEST_SIDECAR_IGNORE_SIGTERM;
+delete process.env.EPISODIC_TEST_SIDECAR_IGNORE_SIGTERM_ONCE;
 
 const { embed, embedQuery, DEFAULT_MODEL, MAX_CHARS, QUERY_PREFIX } = await import("./embed.ts");
 
@@ -167,6 +177,190 @@ describe("embedding sidecar protocol", () => {
     expect(requests.map(({ texts: requestTexts }) => requestTexts?.length)).toEqual([32, 1]);
   });
 
+  test("evicts an idle sidecar and starts one replacement for concurrent fresh work", async () => {
+    const hostDirectory = mkdtempSync(join(directory, "idle-host-"));
+    const hostLogPath = join(hostDirectory, "sidecar.log");
+    const script = `
+      const { embed } = await import(${JSON.stringify(source)});
+      await embed(["before-idle"]);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const results = await Promise.all([embed(["after-idle-one"]), embed(["after-idle-two"])]);
+      console.log(JSON.stringify(results.map((vectors) => vectors.map((vector) => Array.from(vector)))));
+    `;
+    const host = Bun.spawn([process.execPath, "-e", script], {
+      env: {
+        ...process.env,
+        EPISODIC_NODE_BINARY: fixture,
+        EPISODIC_TEST_SIDECAR_LOG: hostLogPath,
+        EPISODIC_EMBED_IDLE_TIMEOUT_MS: "20",
+      },
+      stdout: "pipe", stderr: "pipe",
+    });
+    const watchdog = setTimeout(() => host.kill(), 5_000);
+    const [stdout, stderr, code] = await Promise.all([new Response(host.stdout).text(), new Response(host.stderr).text(), host.exited]).finally(() => clearTimeout(watchdog));
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout.trim())).toEqual([[[14, 0, 1]], [[14, 0, 1]]]);
+    const hostEvents = readFileSync(hostLogPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const starts = hostEvents.filter(({ event }: { event: string }) => event === "start");
+    expect(starts).toHaveLength(2);
+    expect(starts[0].pid).not.toBe(starts[1].pid);
+  });
+
+  test("accepts disabled idle eviction and rejects invalid values before spawning", async () => {
+    const hostDirectory = mkdtempSync(join(directory, "disabled-idle-host-"));
+    const hostLogPath = join(hostDirectory, "sidecar.log");
+    const script = `
+      const { embed } = await import(${JSON.stringify(source)});
+      await embed(["disabled-one"]);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      await embed(["disabled-two"]);
+      console.log("ok");
+    `;
+    const host = Bun.spawn([process.execPath, "-e", script], { env: { ...process.env, EPISODIC_NODE_BINARY: fixture, EPISODIC_TEST_SIDECAR_LOG: hostLogPath, EPISODIC_EMBED_IDLE_TIMEOUT_MS: "0" }, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([new Response(host.stdout).text(), new Response(host.stderr).text(), host.exited]);
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout.trim()).toBe("ok");
+    const disabledEvents = readFileSync(hostLogPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(disabledEvents.filter(({ event }: { event: string }) => event === "start")).toHaveLength(1);
+
+    const invalid = await isolatedEmbed("never-spawned", { EPISODIC_EMBED_IDLE_TIMEOUT_MS: "-1" });
+    expect(invalid.result.ok).toBe(false);
+    expect(invalid.result.error).toContain("Invalid EPISODIC_EMBED_IDLE_TIMEOUT_MS");
+    expect(invalid.events).toEqual([]);
+  });
+
+  test("waits for a deliberately slow idle shutdown before sharing one replacement", async () => {
+    const hostDirectory = mkdtempSync(join(directory, "idle-race-host-"));
+    const hostLogPath = join(hostDirectory, "sidecar.log");
+    const script = `
+      import { existsSync, readFileSync } from "node:fs";
+      const { embed } = await import(${JSON.stringify(source)});
+      const log = ${JSON.stringify(hostLogPath)};
+      const waitForStopping = async () => {
+        const until = Date.now() + 2000;
+        while (Date.now() < until) {
+          if (existsSync(log) && readFileSync(log, "utf8").includes('"event":"stopping"')) return;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        throw new Error("idle shutdown did not start");
+      };
+      await embed(["race-before"]);
+      await waitForStopping();
+      const results = await Promise.all([embed(["race-after-one"]), embed(["race-after-two"])]);
+      console.log(JSON.stringify(results.map((vectors) => vectors.map((vector) => Array.from(vector)))));
+    `;
+    const host = Bun.spawn([process.execPath, "-e", script], {
+      env: {
+        ...process.env,
+        EPISODIC_NODE_BINARY: fixture,
+        EPISODIC_TEST_SIDECAR_LOG: hostLogPath,
+        EPISODIC_EMBED_IDLE_TIMEOUT_MS: "15",
+        EPISODIC_TEST_SIDECAR_DELAY_EXIT_MS: "75",
+      },
+      stdout: "pipe", stderr: "pipe",
+    });
+    const watchdog = setTimeout(() => host.kill(), 5_000);
+    const [stdout, stderr, code] = await Promise.all([new Response(host.stdout).text(), new Response(host.stderr).text(), host.exited]).finally(() => clearTimeout(watchdog));
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(JSON.parse(stdout.trim())).toEqual([[[14, 0, 1]], [[14, 0, 1]]]);
+    const hostEvents = readFileSync(hostLogPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const starts = hostEvents.filter(({ event }: { event: string }) => event === "start");
+    expect(starts).toHaveLength(2);
+    const firstExit = hostEvents.findIndex(({ event }: { event: string }) => event === "exit");
+    const replacementStart = hostEvents.findIndex(({ event, pid }: { event: string; pid?: number }) => event === "start" && pid === starts[1].pid);
+    expect(firstExit).toBeGreaterThanOrEqual(0);
+    expect(replacementStart).toBeGreaterThan(firstExit);
+  });
+
+  test("never idles a sidecar while readiness or concurrent work is active", async () => {
+    const readiness = await isolatedEmbed("slow-first", {
+      EPISODIC_EMBED_IDLE_TIMEOUT_MS: "10",
+      EPISODIC_TEST_SIDECAR_READY_DELAY_MS: "40",
+    });
+    expect(readiness.result).toEqual({ ok: true, vectors: [[10, 0, 1]] });
+    expect(readiness.events.filter(({ event }: { event: string }) => event === "start")).toHaveLength(1);
+
+    const work = await isolatedEmbeds(Array.from({ length: 33 }, (_, index) => index === 0 ? "slow-first" : `batch-${index}`), {
+      EPISODIC_EMBED_IDLE_TIMEOUT_MS: "10",
+      EPISODIC_EMBED_BATCH_SIZE: "32",
+    });
+    expect(work.results.every(({ ok }) => ok)).toBe(true);
+    expect(work.events.filter(({ event }: { event: string }) => event === "start")).toHaveLength(1);
+  });
+
+  test("keeps one lease across delayed sequential batches of a logical embed", async () => {
+    const hostDirectory = mkdtempSync(join(directory, "batch-lease-host-"));
+    const hostLogPath = join(hostDirectory, "sidecar.log");
+    const script = `
+      const { embed } = await import(${JSON.stringify(source)});
+      const texts = Array.from({ length: 33 }, (_, index) => index === 0 ? "slow-first" : "batch-" + index);
+      console.log((await embed(texts)).length);
+    `;
+    const host = Bun.spawn([process.execPath, "-e", script], { env: { ...process.env, EPISODIC_NODE_BINARY: fixture, EPISODIC_TEST_SIDECAR_LOG: hostLogPath, EPISODIC_EMBED_IDLE_TIMEOUT_MS: "10", EPISODIC_EMBED_BATCH_SIZE: "32" }, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([new Response(host.stdout).text(), new Response(host.stderr).text(), host.exited]);
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout.trim()).toBe("33");
+    const batchEvents = readFileSync(hostLogPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(batchEvents.filter(({ event }: { event: string }) => event === "start")).toHaveLength(1);
+    expect(batchEvents.filter(({ event }: { event: string }) => event === "request").map(({ texts }: { texts: string[] }) => texts.length)).toEqual([32, 1]);
+  });
+
+  test("resets idle time after fresh work and recoverable request errors", async () => {
+    const hostDirectory = mkdtempSync(join(directory, "idle-reset-host-"));
+    const hostLogPath = join(hostDirectory, "sidecar.log");
+    const script = `
+      const { embed } = await import(${JSON.stringify(source)});
+      const wait = () => new Promise((resolve) => setTimeout(resolve, 35));
+      await embed(["reset-first"]);
+      await wait();
+      await embed(["request-error"]).catch(() => {});
+      await wait();
+      await embed(["reset-last"]);
+      console.log("ok");
+    `;
+    const host = Bun.spawn([process.execPath, "-e", script], { env: { ...process.env, EPISODIC_NODE_BINARY: fixture, EPISODIC_TEST_SIDECAR_LOG: hostLogPath, EPISODIC_EMBED_IDLE_TIMEOUT_MS: "60" }, stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([new Response(host.stdout).text(), new Response(host.stderr).text(), host.exited]);
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout.trim()).toBe("ok");
+    const resetEvents = readFileSync(hostLogPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(resetEvents.filter(({ event }: { event: string }) => event === "start")).toHaveLength(1);
+    expect(resetEvents.filter(({ event }: { event: string }) => event === "request").map(({ texts }: { texts: string[] }) => texts[0])).toEqual(["reset-first", "request-error", "reset-last"]);
+  });
+
+  test("force-kills an uncooperative idle child before concurrent callers share a replacement", async () => {
+    const hostDirectory = mkdtempSync(join(directory, "force-kill-host-"));
+    const hostLogPath = join(hostDirectory, "sidecar.log");
+    const ignoredOncePath = join(hostDirectory, "ignored-once");
+    const script = `
+      import { existsSync, readFileSync } from "node:fs";
+      const { embed } = await import(${JSON.stringify(source)});
+      const log = ${JSON.stringify(hostLogPath)};
+      await embed(["force-before"]);
+      while (!existsSync(log) || !readFileSync(log, "utf8").includes('"event":"ignored-sigterm"')) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      await Promise.all([embed(["force-after-one"]), embed(["force-after-two"])]);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      console.log("ok");
+    `;
+    const host = Bun.spawn([process.execPath, "-e", script], { env: { ...process.env, EPISODIC_NODE_BINARY: fixture, EPISODIC_TEST_SIDECAR_LOG: hostLogPath, EPISODIC_EMBED_IDLE_TIMEOUT_MS: "15", EPISODIC_TEST_SIDECAR_IGNORE_SIGTERM_ONCE: ignoredOncePath }, stdout: "pipe", stderr: "pipe" });
+    const watchdog = setTimeout(() => host.kill(), 5_000);
+    const [stdout, stderr, code] = await Promise.all([new Response(host.stdout).text(), new Response(host.stderr).text(), host.exited]).finally(() => clearTimeout(watchdog));
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout.trim()).toBe("ok");
+    const forceEvents = readFileSync(hostLogPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const starts = forceEvents.filter(({ event }: { event: string }) => event === "start");
+    expect(starts).toHaveLength(2);
+    expect(processIsGone(starts[0].pid)).toBe(true);
+    expect(forceEvents.filter(({ event }: { event: string }) => event === "request").map(({ texts }: { texts: string[] }) => texts[0])).toEqual(["force-before", "force-after-one", "force-after-two"]);
+  });
+
   test("matches concurrent replies by request ID even when replies arrive out of order", async () => {
     const [slow, fast] = await Promise.all([embed(["slow-first"]), embed(["fast-second"])]);
     expect(slow).toEqual([new Float32Array([10, 0, 1])]);
@@ -206,6 +400,16 @@ describe("embedding sidecar protocol", () => {
     });
     expect(result).toEqual({ ok: true, vectors: [[16, 0, 1]] });
     expect(hostEvents.filter(({ event }: { event: string }) => event === "start")).toHaveLength(2);
+  });
+
+  test("does not send or hang a request when ready output is immediately followed by a protocol fault", async () => {
+    const { result, events: hostEvents } = await isolatedEmbed("after-invalid-ready", {
+      EPISODIC_TEST_SIDECAR_STARTUP_MODE: "ready-then-invalid",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("stdout contained invalid JSON");
+    expect(hostEvents.filter(({ event }: { event: string }) => event === "request")).toHaveLength(0);
+    expect(hostEvents.filter(({ event }: { event: string }) => event === "start")).toHaveLength(1);
   });
 
   test("bounds readiness and request waits and tears down stalled sidecars", async () => {
