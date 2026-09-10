@@ -17,6 +17,7 @@ const DEFAULT_BATCH_SIZE = 32;
 const MAX_BATCH_SIZE = 64;
 const DEFAULT_READY_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
+const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 export type EmbedMode = "sidecar" | "inline";
@@ -36,12 +37,19 @@ type Sidecar = {
   stderr: string;
   stdout: string;
   dimensions: number | null;
+  stopping: boolean;
+  failure: Error | null;
+  initialized: boolean;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+  exit: Promise<void>;
+  resolveExit: () => void;
 };
 
 class SidecarUnavailableError extends Error {}
 
 let sidecar: Sidecar | null = null;
 let nextRequestId = 1;
+let activeOperations = 0;
 
 export function getEmbedMode(): EmbedMode {
   const mode = process.env.EPISODIC_EMBED_MODE ?? "sidecar";
@@ -64,6 +72,17 @@ function positiveIntegerEnv(name: string, defaultValue: number, maximum: number)
   return parsed;
 }
 
+function idleTimeoutEnv(): number {
+  const value = process.env.EPISODIC_EMBED_IDLE_TIMEOUT_MS;
+  if (value === undefined) return DEFAULT_IDLE_TIMEOUT_MS;
+  if (!/^\d+$/.test(value)) throw new Error(`Invalid EPISODIC_EMBED_IDLE_TIMEOUT_MS ${JSON.stringify(value)}; expected an integer from 0 to ${MAX_TIMEOUT_MS}.`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > MAX_TIMEOUT_MS) {
+    throw new Error(`Invalid EPISODIC_EMBED_IDLE_TIMEOUT_MS ${JSON.stringify(value)}; expected an integer from 0 to ${MAX_TIMEOUT_MS}.`);
+  }
+  return parsed;
+}
+
 function sidecarError(message: string, child: Sidecar): Error {
   const details = child.stderr.trim();
   return new SidecarUnavailableError(details ? `${message}: ${details}` : message);
@@ -75,10 +94,44 @@ function rejectAll(child: Sidecar, error: Error): void {
   child.rejectReady(error);
 }
 
-function sidecarGone(child: Sidecar, error: Error): void {
-  if (sidecar === child) sidecar = null;
+function clearIdleTimer(child: Sidecar): void {
+  if (child.idleTimer) clearTimeout(child.idleTimer);
+  child.idleTimer = null;
+}
+
+function stopSidecar(child: Sidecar, error: Error): Promise<void> {
+  if (child.stopping) return child.exit;
+  child.stopping = true;
+  child.failure = error;
+  clearIdleTimer(child);
   rejectAll(child, error);
-  child.process.kill();
+  try {
+    child.process.kill();
+  } catch {}
+  const forceKill = setTimeout(() => {
+    if (child.stopping) {
+      try { child.process.kill(9); } catch {}
+    }
+  }, 1_000);
+  forceKill.unref();
+  void child.exit.finally(() => clearTimeout(forceKill));
+  return child.exit;
+}
+
+function sidecarGone(child: Sidecar, error: Error): void {
+  void stopSidecar(child, error);
+}
+
+function scheduleIdleStop(child: Sidecar, timeoutMs: number): void {
+  clearIdleTimer(child);
+  if (!timeoutMs || !child.initialized || child.stopping || activeOperations !== 0 || sidecar !== child) return;
+  const timer = setTimeout(() => {
+    if (sidecar === child && !child.stopping && activeOperations === 0) {
+      void stopSidecar(child, new SidecarUnavailableError("Embedding sidecar stopped after being idle"));
+    }
+  }, timeoutMs);
+  timer.unref();
+  child.idleTimer = timer;
 }
 
 function protocolFailure(child: Sidecar, message: string): void {
@@ -108,6 +161,9 @@ function vectorsFromResponse(value: unknown, expectedCount: number, child: Sidec
 }
 
 function handleLine(child: Sidecar, line: string): void {
+  // Output already buffered from a retired process cannot describe the current
+  // generation and must not publish a new shutdown state.
+  if (child.stopping || sidecar !== child) return;
   let response: unknown;
   try {
     response = JSON.parse(line);
@@ -122,7 +178,10 @@ function handleLine(child: Sidecar, line: string): void {
 
   const record = response as Record<string, unknown>;
   if ("ready" in record) {
-    if (record.ready === true) child.resolveReady();
+    if (record.ready === true) {
+      child.initialized = true;
+      child.resolveReady();
+    }
     else {
       sidecarGone(child, new SidecarUnavailableError(`Embedding sidecar failed to start: ${typeof record.error === "string" ? record.error : "unknown error"}`));
     }
@@ -166,7 +225,7 @@ async function drainStdout(child: Sidecar): Promise<void> {
         if (line) handleLine(child, line);
       }
     }
-    if (child.stdout.trim()) protocolFailure(child, "stdout ended with an incomplete response");
+    if (child.stdout.trim() && !child.stopping) protocolFailure(child, "stdout ended with an incomplete response");
   } catch (error) {
     if (sidecar === child) sidecarGone(child, sidecarError(`Could not read embedding sidecar output (${String(error)})`, child));
   } finally {
@@ -188,8 +247,7 @@ async function drainStderr(child: Sidecar): Promise<void> {
   }
 }
 
-function startSidecar(): Sidecar {
-  if (sidecar) return sidecar;
+function spawnSidecar(): Sidecar {
   const nodeBinary = process.env.EPISODIC_NODE_BINARY ?? "node";
   const sidecarPath = fileURLToPath(new URL("./embed-sidecar.mjs", import.meta.url));
   let resolveReady!: () => void;
@@ -215,17 +273,30 @@ function startSidecar(): Sidecar {
     throw new Error(`Could not start embedding sidecar using ${JSON.stringify(nodeBinary)}. Install Node 20+ or set EPISODIC_NODE_BINARY: ${String(error)}`);
   }
   childProcess.unref();
-  const child: Sidecar = { process: childProcess, pending: new Map(), ready, resolveReady, rejectReady, stderr: "", stdout: "", dimensions: null };
+  let resolveExit!: () => void;
+  const exit = new Promise<void>((resolve) => { resolveExit = resolve; });
+  const child: Sidecar = { process: childProcess, pending: new Map(), ready, resolveReady, rejectReady, stderr: "", stdout: "", dimensions: null, stopping: false, failure: null, initialized: false, idleTimer: null, exit, resolveExit };
   sidecar = child;
   void drainStdout(child);
   void drainStderr(child);
   void childProcess.exited.then(() => {
+    clearIdleTimer(child);
     if (sidecar === child) {
       sidecar = null;
-      rejectAll(child, sidecarError("Embedding sidecar exited unexpectedly", child));
     }
+    rejectAll(child, child.failure ?? sidecarError("Embedding sidecar exited unexpectedly", child));
+    child.resolveExit();
   });
   return child;
+}
+
+async function acquireSidecar(): Promise<Sidecar> {
+  while (true) {
+    const child = sidecar;
+    if (child && !child.stopping) return child;
+    if (child) await child.exit;
+    else return spawnSidecar();
+  }
 }
 
 function awaitReady(child: Sidecar, timeoutMs: number): Promise<void> {
@@ -251,8 +322,9 @@ function awaitReady(child: Sidecar, timeoutMs: number): Promise<void> {
 async function requestSidecar(texts: string[], readyTimeoutMs: number, requestTimeoutMs: number, retried = false): Promise<Float32Array[]> {
   let child: Sidecar;
   try {
-    child = startSidecar();
+    child = await acquireSidecar();
     await awaitReady(child, readyTimeoutMs);
+    if (child.stopping || sidecar !== child) throw child.failure ?? new SidecarUnavailableError("Embedding sidecar became unavailable after becoming ready");
     const id = nextRequestId++;
     return await new Promise<Float32Array[]>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -267,7 +339,7 @@ async function requestSidecar(texts: string[], readyTimeoutMs: number, requestTi
         reject(error);
       };
       child.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, count: texts.length });
-      if (sidecar !== child) {
+      if (child.stopping || sidecar !== child) {
         child.pending.delete(id);
         rejectRequest(new SidecarUnavailableError("Embedding sidecar became unavailable before the request was sent"));
         return;
@@ -299,11 +371,19 @@ async function embedRaw(texts: string[]): Promise<Float32Array[]> {
   const batchSize = positiveIntegerEnv("EPISODIC_EMBED_BATCH_SIZE", DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE);
   const readyTimeoutMs = positiveIntegerEnv("EPISODIC_EMBED_READY_TIMEOUT_MS", DEFAULT_READY_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const requestTimeoutMs = positiveIntegerEnv("EPISODIC_EMBED_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT_MS, MAX_TIMEOUT_MS);
-  const vectors: Float32Array[] = [];
-  for (let index = 0; index < prepared.length; index += batchSize) {
-    vectors.push(...await requestSidecar(prepared.slice(index, index + batchSize), readyTimeoutMs, requestTimeoutMs));
+  const idleTimeoutMs = idleTimeoutEnv();
+  activeOperations += 1;
+  if (sidecar) clearIdleTimer(sidecar);
+  try {
+    const vectors: Float32Array[] = [];
+    for (let index = 0; index < prepared.length; index += batchSize) {
+      vectors.push(...await requestSidecar(prepared.slice(index, index + batchSize), readyTimeoutMs, requestTimeoutMs));
+    }
+    return vectors;
+  } finally {
+    activeOperations -= 1;
+    if (sidecar) scheduleIdleStop(sidecar, idleTimeoutMs);
   }
-  return vectors;
 }
 
 /** Embed documents (conversation chunks). No prefix. */
