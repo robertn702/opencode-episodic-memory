@@ -56,8 +56,10 @@ Default sidecar-mode semantic indexing and vector/hybrid search require a system
 **Node 20+** binary (`node` by default). The first embedding run downloads the
 model (~100 MB, cached afterward). The model and its native runtime live in
 that Node sidecar, not inside OpenCode's Bun/TUI process. The warm sidecar is
-stopped after its configured idle timeout to release model memory; the next
-embedding request starts a fresh child and reloads the cached model, so the
+stopped after its configured idle timeout to release model memory: the host
+sends SIGTERM, then SIGKILL if the child remains alive one second later. Output
+from retired children is ignored. The next embedding request waits for the old
+child to exit before starting a fresh one and reloading the cached model, so the
 first request after idle eviction has model-loading latency. Explicit
 `EPISODIC_EMBED_MODE=inline` works without Node but is unsafe in affected
 OpenCode/Bun versions. `episodic_read_window`, `episodic_read_session`, and lexical text search also remain

@@ -69,12 +69,14 @@ only after sidecar initialization and completion of all embedding work, so
 startup, queued or in-flight requests, and sequential batches are protected.
 When the timer fires, the host stops the child to release the loaded model; a
 later embedding request lazily starts one replacement child and reloads the
-cached model. Host state coordinates the intentional shutdown/new-request race,
-and the timer is unref'd so it cannot keep the CLI alive. Invalid settings are
-rejected before spawn. Background indexing is embedding activity; idle eviction
-reduces retained idle memory but does not cap memory across simultaneously active
-runtimes. The first request after eviction therefore includes model-loading
-latency.
+cached model. Stopping sends SIGTERM, then SIGKILL if the child remains alive
+one second later; protocol output from retired children is ignored. Host state
+waits for the old child to exit before replacement and coordinates the
+intentional shutdown/new-request race. The timer is unref'd so it cannot keep
+the CLI alive. Invalid settings are rejected before spawn. Background indexing
+is embedding activity; idle eviction reduces retained idle memory but does not
+cap memory across simultaneously active runtimes. The first request after
+eviction therefore includes model-loading latency.
 
 ## Module map
 
@@ -334,7 +336,7 @@ silently bypassing the privacy gate. Foreign-source reads depend on source sync.
 | Source-scoped remote rows | Cross-device search can combine histories without one device overwriting or pruning another device's sessions. |
 | Remote vector-only v1 | Avoids relying on hosted FTS virtual tables, triggers, or migration behavior; cosine ranking remains client-side. |
 | Shared `format.ts` | CLI and plugin stay thin and can't drift apart in output formatting or date handling. |
-| Node sidecar by default | Importing the plugin must not dlopen Transformers.js native addons (`onnxruntime-node`, `sharp`) into OpenCode's embedded Bun. A detached, unref'd Node 20+ process starts only on the first embedding and serializes inference. The host evicts it after `EPISODIC_EMBED_IDLE_TIMEOUT_MS` of inactivity (default 5 minutes, `0` disables) to release model memory. A later request waits for the old child to exit before starting one replacement and reloading the cached model. The child also exits on stdin EOF when its Bun host goes away. |
+| Node sidecar by default | Importing the plugin must not dlopen Transformers.js native addons (`onnxruntime-node`, `sharp`) into OpenCode's embedded Bun. A detached, unref'd Node 20+ process starts only on the first embedding and serializes inference. The host evicts it after `EPISODIC_EMBED_IDLE_TIMEOUT_MS` of inactivity (default 5 minutes, `0` disables) to release model memory. It sends SIGTERM, escalates to SIGKILL if the child remains alive one second later, and ignores retired-child protocol output. A later request waits for the old child to exit before starting one replacement and reloading the cached model. The child also exits on stdin EOF when its Bun host goes away. |
 | Inline is explicit and lazy | `EPISODIC_EMBED_MODE=inline` dynamically imports its backend only on an embedding call, but is unsafe on affected OpenCode/Bun versions with native-addon teardown defects. There is never automatic fallback from failed sidecar startup to inline. |
 | Env-var-only config (`EPISODIC_*`) | No config file yet (YAGNI). |
 
