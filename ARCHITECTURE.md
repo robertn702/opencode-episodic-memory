@@ -102,6 +102,10 @@ any time (`sync --force`).
 
 ### Source: `opencode.db` (read-only, owned by OpenCode)
 
+The layout below is the verified 1.x source contract, not a claim of 2.x
+compatibility. See [OpenCode 2.0 compatibility](docs/opencode-2-compatibility.md)
+for the reported schema change and migration checks.
+
 ```
 session (id, project_id, parent_id, title, directory, time_created, time_updated, time_archived)
 message (id, session_id, time_created, data)   -- data = JSON blob: {role, ...}
