@@ -25,6 +25,8 @@ Semantic search over past OpenCode conversations via native plugin tools.
   snowflake choice
 - `docs/alternatives.md` — comparison with other OpenCode memory plugins
   (opencode-mem, codemem, memsearch, ...) and why this one exists
+- `docs/opencode-2-compatibility.md` — reported OpenCode 2.0 source-store
+  changes, impact on this reader, and migration verification checklist
 - `eval/` — reusable model-comparison harness; private inputs/outputs
   (`queries.ts`, `corpus.json`, `results-*`) live in `eval/private/`, which is
   gitignored wholesale — drop any new private artifact there, no gitignore
@@ -88,6 +90,11 @@ Semantic search over past OpenCode conversations via native plugin tools.
   chunks).
 - OpenCode sessions live in one SQLite DB (WAL mode; concurrent read-only access
   is safe), NOT JSONL transcripts like Claude Code.
+- The source schema described here is the verified 1.x layout. A firsthand
+  report of OpenCode 2.0.12 describes `session_v2` / `session_message` and
+  nested parts; this reader is not yet verified against it. See
+  `docs/opencode-2-compatibility.md` before changing source queries, privacy
+  checks, anchors, or sync pruning.
 - Runtime validation of `opencode.db` reads uses **Zod** (`src/reader.ts`), split
   by failure mode: **structural rows** (`listSessions`/`getSession`/`getTranscript`
   row envelopes — the id/time_created/data columns) **throw** via `.parse()`, so

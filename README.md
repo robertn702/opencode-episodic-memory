@@ -23,6 +23,12 @@ of the OpenCode memory-plugin landscape? See
 5. **Recall** — native plugin tools `episodic_search` / `episodic_read_window` / `episodic_read_session`, plus a `remembering-conversations` skill that teaches the agent when to search
 6. **Stay fresh** — the plugin re-indexes each session on the `session.idle` event
 
+**OpenCode 2.0 compatibility is unverified.** A reported source-database schema
+change affects this plugin's read-only reader, live transcript tools, and sync.
+See [the migration implications and verification checklist](docs/opencode-2-compatibility.md)
+before upgrading a source store used by this plugin; an existing index does not
+prove new sessions are being indexed.
+
 Design note: `bun:sqlite` cannot load dynamic extensions, so sqlite-vec is not
 usable inside OpenCode plugins. Brute-force cosine is single-digit milliseconds
 at this scale (thousands of chunks) and has zero native-dependency risk. The
