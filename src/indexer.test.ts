@@ -3,8 +3,8 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { syncSession } from "./indexer";
-import { openConfiguredIndex, type IndexStore } from "./store";
+import { syncAll, syncSession } from "./indexer";
+import { localIndexStore, openConfiguredIndex, openIndex, type IndexStore } from "./store";
 
 const dir = mkdtempSync(join(tmpdir(), "episodic-indexer-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -79,4 +79,35 @@ describe("syncSession remote privacy", () => {
       if (original.token === undefined) delete process.env.EPISODIC_INDEX_AUTH_TOKEN; else process.env.EPISODIC_INDEX_AUTH_TOKEN = original.token;
     }
   });
+});
+
+test("V1 to V2 transition reprocesses unchanged timestamps and prunes only after layout validation", async () => {
+  const source = new Database(":memory:");
+  const index = localIndexStore(openIndex(join(dir, "transition.db")));
+  try {
+    source.run("CREATE TABLE session (id TEXT, project_id TEXT, parent_id TEXT, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, time_archived INTEGER)");
+    source.run("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
+    source.run("CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
+    source.run("INSERT INTO session VALUES ('ses_transition', 'project', NULL, 'Old', '/tmp', 1, 1, NULL)");
+    source.run("CREATE TABLE session_v2 (id TEXT, project_id TEXT, parent_id TEXT, title TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, time_archived INTEGER)");
+    source.run("CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT)");
+    source.run("INSERT INTO session_v2 VALUES ('ses_transition', 'project', NULL, 'New', '/tmp', 1, 1, NULL)");
+    source.run("INSERT INTO session VALUES ('ses_pending', 'project', NULL, 'Pending', '/tmp', 2, 2, NULL)");
+    await index.replaceSessionChunks({ id: 'ses_transition', project_id: 'project', parent_id: null, title: 'Old', directory: '/tmp', time_created: 1, source_time_updated: 1 }, [], 'empty');
+    expect(await syncAll(source, index)).toMatchObject({ indexed: 0, empty: 2, skippedFresh: 0, pruned: 0 });
+    expect(await index.getIndexedSession('ses_transition')).toMatchObject({ status: 'empty-v2', title: 'New' });
+    expect(await index.getIndexedSession('ses_pending')).toMatchObject({ status: 'empty' });
+    source.run("INSERT INTO session_v2 VALUES ('ses_pending', 'project', NULL, 'Migrated', '/tmp', 2, 2, NULL)");
+    expect(await syncAll(source, index)).toMatchObject({ skippedFresh: 1, empty: 1 });
+    expect(await index.getIndexedSession('ses_pending')).toMatchObject({ status: 'empty-v2', title: 'Migrated' });
+    source.run("DELETE FROM session_v2");
+    expect(await syncAll(source, index)).toMatchObject({ skippedFresh: 0, empty: 2, pruned: 0 });
+    source.run("DELETE FROM session");
+    expect(await syncAll(source, index)).toMatchObject({ pruned: 2 });
+    expect(await index.getIndexedSession('ses_transition')).toBeNull();
+    source.run("DROP TABLE session_message");
+    await index.replaceSessionChunks({ id: 'ses_transition', project_id: 'project', parent_id: null, title: 'Old', directory: '/tmp', time_created: 1, source_time_updated: 1 }, [], 'empty');
+    await expect(syncAll(source, index)).rejects.toThrow('Incomplete OpenCode source layout');
+    expect(await index.getIndexedSession('ses_transition')).not.toBeNull();
+  } finally { index.close(); source.close(); }
 });

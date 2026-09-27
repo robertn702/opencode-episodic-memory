@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { listSessions, getSession, getTranscriptChecked, getTranscriptContext, transcriptHasMarker, EXCLUDE_MARKER, type SourceMessage } from "./reader";
+import { listSessions, getSession, getTranscriptChecked, getTranscriptContext, transcriptHasMarker, sourceLayout, EXCLUDE_MARKER, type SourceMessage } from "./reader";
 
 // getTranscript is module-internal now; exercise its blob-degradation behavior
 // through the privacy-gated accessor. These fixtures carry no exclusion marker,
@@ -320,5 +320,116 @@ describe("getTranscriptContext", () => {
     // The marker is outside the requested anchor-only window; the privacy gate
     // remains session-wide rather than depending on the selected message rows.
     expect(getTranscriptContext(db, "ses_context", "msg_4", 0, 0)).toEqual({ ok: false, reason: "excluded" });
+  });
+});
+
+// Minimal V2.0.18 columns (session_v2 and session_message from upstream sql.ts).
+function makeV2(retainLegacy = false): Database {
+  const db = retainLegacy ? makeSource() : new Database(":memory:");
+  db.run(`CREATE TABLE session_v2 (
+    id TEXT, project_id TEXT, parent_id TEXT, title TEXT, directory TEXT,
+    time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+  )`);
+  db.run(`CREATE TABLE session_message (
+    id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT
+  )`);
+  db.run("INSERT INTO session_v2 VALUES ('v2', 'proj', NULL, NULL, '/dir', 100, 200, NULL)");
+  return db;
+}
+
+function addV2(db: Database, id: string, type: string, seq: number, data: string, time = 100): void {
+  db.run("INSERT INTO session_message VALUES (?, 'v2', ?, ?, ?, ?)", [id, type, seq, time, data]);
+}
+
+describe("OpenCode v2 source layout", () => {
+  test("detects complete layouts, prefers v2 after migration, rejects missing tables and columns", () => {
+    expect(sourceLayout(makeSource())).toBe("v1");
+    expect(sourceLayout(makeV2())).toBe("v2");
+    expect(sourceLayout(makeV2(true))).toBe("v2");
+    const empty = new Database(":memory:");
+    expect(() => sourceLayout(empty)).toThrow("Unknown OpenCode source layout");
+    empty.run("CREATE TABLE session_v2 (id TEXT)");
+    expect(() => sourceLayout(empty)).toThrow("missing session_message");
+    empty.run("CREATE TABLE session_message (id TEXT)");
+    expect(() => sourceLayout(empty)).toThrow("session_v2 missing");
+    const incompleteLegacy = makeV2();
+    incompleteLegacy.run("CREATE TABLE part (id TEXT)");
+    expect(() => sourceLayout(incompleteLegacy)).toThrow("missing session, message");
+  });
+
+  test("normalizes nullable title and honors archiving, without loosening v1 validation", () => {
+    const db = makeV2();
+    db.run("INSERT INTO session_v2 VALUES ('arch', 'proj', NULL, 'hidden', '/dir', 50, 60, 70)");
+    expect(listSessions(db).map((s) => [s.id, s.title])).toEqual([["v2", ""]]);
+    expect(getSession(db, "v2")?.title).toBe("");
+    expect(getSession(db, "arch")?.title).toBe("hidden");
+    expect(getSession(db, "absent")).toBeNull();
+    db.run("UPDATE session_v2 SET time_updated = NULL WHERE id = 'v2'");
+    expect(() => getSession(db, "v2")).toThrow();
+  });
+
+  test("maps V2 user text and assistant content; ignores non-conversational events", () => {
+    const db = makeV2();
+    addV2(db, "u", "user", 1, JSON.stringify({ text: "prompt", files: [{ name: "foo" }] }), 500);
+    addV2(db, "a", "assistant", 2, JSON.stringify({ content: [
+      { type: "text", text: "answer" }, { type: "reasoning", text: "thinking" },
+      { type: "tool", name: "read", state: { status: "completed" } }, { type: "text", text: 1 },
+    ] }), 300);
+    addV2(db, "idle", "idle", 3, "{}");
+    addV2(db, "bad", "assistant", 4, "{malformed");
+    expect(readMessages(db, "v2")).toEqual([
+      { id: "u", role: "user", timeCreated: 500, parts: [{ type: "text", text: "prompt" }] },
+      { id: "a", role: "assistant", timeCreated: 300, parts: [
+        { type: "text", text: "answer" }, { type: "reasoning", text: "thinking" },
+        { type: "tool", tool: "read" }, { type: "text" },
+      ] },
+      { id: "idle", role: "unknown", timeCreated: 100, parts: [] },
+      { id: "bad", role: "assistant", timeCreated: 100, parts: [] },
+    ]);
+    db.run("UPDATE session_message SET type = NULL WHERE id = 'idle'");
+    expect(() => readMessages(db, "v2")).toThrow();
+  });
+
+  test("checks raw V2 data and retained legacy blobs session-wide before any read", () => {
+    const db = makeV2(true);
+    addV2(db, "u", "user", 1, JSON.stringify({ text: "safe" }));
+    addV2(db, "a", "assistant", 2, JSON.stringify({ content: [{ type: "tool", name: "read", state: { content: [{ type: "text", text: EXCLUDE_MARKER }] } }] }));
+    expect(transcriptHasMarker(db, "v2")).toBe(true);
+    expect(getTranscriptChecked(db, "v2")).toEqual({ excluded: true });
+    expect(getTranscriptContext(db, "v2", "u", 0, 0)).toEqual({ ok: false, reason: "excluded" });
+    db.run("DELETE FROM session_message WHERE id = 'a'");
+    addMessage(db, "old", "v2", 10, `{"role":"user"}`);
+    addPart(db, "oldpart", "old", "v2", 10, `{broken ${EXCLUDE_MARKER}`);
+    expect(getTranscriptChecked(db, "v2")).toEqual({ excluded: true });
+    db.run("DELETE FROM part");
+    db.run("UPDATE message SET data = ? WHERE id = 'old'", [`{broken ${EXCLUDE_MARKER}`]);
+    expect(getTranscriptContext(db, "v2", "u", 0, 0)).toEqual({ ok: false, reason: "excluded" });
+    db.run("DELETE FROM message");
+    expect(transcriptHasMarker(db, "v2")).toBe(false);
+  });
+
+  test("uses seq, not timestamp, for bounded windows and counts inline content omissions", () => {
+    const db = makeV2();
+    addV2(db, "first", "user", 10, JSON.stringify({ text: "first" }), 900);
+    addV2(db, "middle", "assistant", 20, JSON.stringify({ content: [
+      { type: "text", text: "x".repeat(20_000) },
+      ...Array.from({ length: 24 }, (_, i) => ({ type: "text", text: `text ${i}` })),
+    ] }), 100);
+    addV2(db, "anchor", "user", 30, JSON.stringify({ text: "anchor" }), 10);
+    addV2(db, "last", "assistant", 40, JSON.stringify({ content: [{ type: "text", text: "last" }] }), 0);
+    const context = getTranscriptContext(db, "v2", "anchor", 1, 1);
+    expect(context).toMatchObject({ ok: true, anchorIndex: 2, sliceStart: 1, total: 4 });
+    if (!context.ok) throw new Error("expected context");
+    expect(context.messages.map((m) => m.id)).toEqual(["middle", "anchor", "last"]);
+    expect(context.messages[0].parts).toHaveLength(20);
+    expect(context.messages[0].parts[0]).toEqual({ type: "text", text: "text 0" });
+    expect(context.messages[0].contextPartsOmitted).toBe(5);
+    expect(getTranscriptContext(db, "v2", "last")).toEqual({ ok: false, reason: "invalid_anchor" });
+    expect(getTranscriptContext(db, "v2", "missing")).toEqual({ ok: false, reason: "invalid_anchor" });
+    expect(getTranscriptContext(db, "v2", "anchor", 21, 0)).toEqual({ ok: false, reason: "invalid_bounds" });
+    expect(getTranscriptContext(db, "missing", "anchor")).toEqual({ ok: false, reason: "unknown_session" });
+    db.run("UPDATE session_message SET data = NULL WHERE id = 'first'");
+    expect(getTranscriptContext(db, "v2", "anchor", 0, 0).ok).toBe(true);
+    expect(() => getTranscriptContext(db, "v2", "first", 0, 0)).toThrow();
   });
 });

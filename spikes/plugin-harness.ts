@@ -200,6 +200,56 @@ if (typeof result !== "string" || !result.includes(sessionId) || !result.include
 if (!result.includes("anchor: msg_user")) {
   throw new Error("harness error: episodic_search did not return a usable context anchor");
 }
+
+// V2: registration uses a replayable synchronous editor, and events use data
+// instead of V1 properties. Exercise the same fixture through both entrypoints.
+const { default: v2Plugin } = await import("../plugin/v2");
+type V2Tool = import("@opencode/plugin/promise/tool").Info;
+const v2Tools = new Map<string, V2Tool>();
+let subscribed = false;
+let cleanedUp = false;
+const v2Context = {
+  location: { directory: process.cwd() },
+  tool: {
+    transform: async (callback: (editor: { add: (definition: V2Tool) => void }) => void) => {
+      const value = callback({ add: (definition) => { v2Tools.set(definition.name, definition); } });
+      if (value !== undefined) throw new Error("harness error: V2 transform was asynchronous");
+      return { dispose: async () => {} };
+    },
+  },
+  event: {
+    subscribe: async function* ({ signal }: { signal: AbortSignal }) {
+      subscribed = true;
+      yield { type: "session.idle", data: { sessionID: sessionId } };
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => { cleanedUp = true; resolve(); }, { once: true }));
+    },
+  },
+} as unknown as import("@opencode/plugin").Plugin.Context;
+const cleanup = await v2Plugin.setup(v2Context);
+const v2Names = [...v2Tools.keys()].sort();
+if (v2Names.join(",") !== expectedToolNames.join(",") || !subscribed) {
+  throw new Error("harness error: V2 tools or subscription not registered");
+}
+const v2CallContext = {
+  sessionID: "harness", messageID: "harness", agent: "harness",
+  signal: new AbortController().signal, progress: async () => {},
+} as unknown as Parameters<V2Tool["execute"]>[1];
+const v2Search = v2Tools.get("episodic_search")!;
+const searchSchema = v2Search.input;
+if (typeof searchSchema !== "object" || searchSchema === null || !("properties" in searchSchema) || !("required" in searchSchema)) {
+  throw new Error("harness error: V2 search input is not JSON Schema");
+}
+const v2Result = await v2Search.execute({ query: "episodic memory architecture decisions", limit: 3 }, v2CallContext);
+if (v2Result.content !== result) throw new Error("harness error: V2 search result differs from V1");
+const v2Window = await v2Tools.get("episodic_read_window")!.execute({ session_id: sessionId, anchor_message_id: "msg_user" }, v2CallContext);
+if (v2Window.content !== preIndexWindow) throw new Error("harness error: V2 window differs from V1");
+const v2Session = await v2Tools.get("episodic_read_session")!.execute({ session_id: sessionId }, v2CallContext);
+if (v2Session.content !== preIndexSession) throw new Error("harness error: V2 session differs from V1");
+if (!cleanup) throw new Error("harness error: V2 setup registered no cleanup");
+await cleanup();
+await new Promise((r) => setTimeout(r, 0));
+if (!cleanedUp) throw new Error("harness error: V2 event stream did not abort on cleanup");
+console.log("V2 tools, event subscription, and cleanup OK");
 console.log("=== episodic_search ===");
 console.log(result.slice(0, 900));
 

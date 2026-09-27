@@ -20,8 +20,14 @@ cat > "$WORK/cache/package.json" <<EOF
 { "dependencies": { "opencode-episodic-memory": "file:$WORK/$TGZ" } }
 EOF
 
-echo "== clean install =="
-(cd "$WORK/cache" && bun install --silent)
+echo "== clean install (bounded by EPISODIC_PACK_INSTALL_TIMEOUT, default 90s) =="
+if (cd "$WORK/cache" && timeout "${EPISODIC_PACK_INSTALL_TIMEOUT:-90s}" bun install --no-progress); then
+  :
+else
+  status=$?
+  echo "PACK SMOKE BLOCKED: clean install exited $status (timeout is 124); later artifact checks were not run" >&2
+  exit "$status"
+fi
 
 echo "== import plugin entry =="
 (cd "$WORK/cache" && bun -e "

@@ -16,18 +16,17 @@ of the OpenCode memory-plugin landscape? See
 
 ## How it works
 
-1. **Read** — sessions/messages/parts from OpenCode's `~/.local/share/opencode/opencode.db` (read-only)
+1. **Read** — v1 or v2 sessions/messages from OpenCode's `~/.local/share/opencode/opencode.db` (read-only)
 2. **Parse** — condensed exchanges (user text, assistant text, tool names; no reasoning blobs or tool output)
 3. **Embed** — local, offline embeddings via Transformers.js in a lazily started, idle-evictable system-Node sidecar (`Snowflake/snowflake-arctic-embed-m-v1.5` q8, 768 dims; retrieval prefix on search queries). Chosen by empirical eval on a real corpus — see [docs/embedding-model-eval.md](docs/embedding-model-eval.md)
 4. **Index** — plain SQLite at `~/.local/share/opencode-episodic-memory/index.db` by default; optional libSQL/Turso remote storage can combine source-scoped indexes across devices
 5. **Recall** — native plugin tools `episodic_search` / `episodic_read_window` / `episodic_read_session`, plus a `remembering-conversations` skill that teaches the agent when to search
 6. **Stay fresh** — the plugin re-indexes each session on the `session.idle` event
 
-**OpenCode 2.0 compatibility is unverified.** A reported source-database schema
-change affects this plugin's read-only reader, live transcript tools, and sync.
-See [the migration implications and verification checklist](docs/opencode-2-compatibility.md)
-before upgrading a source store used by this plugin; an existing index does not
-prove new sessions are being indexed.
+OpenCode v1 and v2 use separate plugin entrypoints in this package, sharing the
+same tools and index. The reader detects both database layouts; the first sync
+after a layout transition rebuilds unchanged-timestamp sessions automatically.
+See [the compatibility details](docs/opencode-2-compatibility.md).
 
 Design note: `bun:sqlite` cannot load dynamic extensions, so sqlite-vec is not
 usable inside OpenCode plugins. Brute-force cosine is single-digit milliseconds
@@ -230,7 +229,7 @@ bun install
 ```jsonc
 // ~/.config/opencode/opencode.json
 {
-  "plugin": ["/path/to/opencode-episodic-memory/plugin/episodic-memory.ts"]
+  "plugin": ["/path/to/opencode-episodic-memory/plugin/episodic-memory.ts"] // v1; use plugin/v2.ts for v2
 }
 ```
 
