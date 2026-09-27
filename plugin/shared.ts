@@ -30,17 +30,21 @@ export function createMemory(log: (level: "info" | "warn" | "error", message: st
         pending.delete(key);
         try {
           const source = openSource();
-          const index = await getIndex();
-          if (sessionId) {
-            const s = getSession(source, sessionId);
-            if (s) await syncSession(source, index, s);
-            // Cheap (two small SELECTs + rare DELETEs), so prune on every idle:
-            // the syncAll path below effectively never fires (session.idle always
-            // carries a sessionID), and without this, deleted conversations would
-            // linger in the index — searchable and readable — for plugin-only users.
-            await pruneOrphans(source, index);
-          } else {
-            await syncAll(source, index); // syncAll prunes source-deleted orphans
+          try {
+            const index = await getIndex();
+            if (sessionId) {
+              const s = getSession(source, sessionId);
+              if (s) await syncSession(source, index, s);
+              // Cheap (two small SELECTs + rare DELETEs), so prune on every idle:
+              // the syncAll path below effectively never fires (session.idle always
+              // carries a sessionID), and without this, deleted conversations would
+              // linger in the index — searchable and readable — for plugin-only users.
+              await pruneOrphans(source, index);
+            } else {
+              await syncAll(source, index); // syncAll prunes source-deleted orphans
+            }
+          } finally {
+            source.close();
           }
           await log("info", `reindexed ${key}`);
         } catch (e) {
@@ -135,7 +139,12 @@ export function createMemory(log: (level: "info" | "warn" | "error", message: st
             return renderIndexedContext(args.session_id, args.source_id, args.anchor_message_id, rows);
           }
           const source = openSource();
-          const context = getTranscriptContext(source, args.session_id, args.anchor_message_id, args.before, args.after);
+          let context: ReturnType<typeof getTranscriptContext>;
+          try {
+            context = getTranscriptContext(source, args.session_id, args.anchor_message_id, args.before, args.after);
+          } finally {
+            source.close();
+          }
           if (!context.ok) {
             if (context.reason === "unknown_session") throw new Error(`No live conversation found for session ${args.session_id}.`);
             if (context.reason === "excluded") throw new Error("Session is marked private (exclusion marker present); context withheld.");
