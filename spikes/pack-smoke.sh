@@ -21,7 +21,11 @@ cat > "$WORK/cache/package.json" <<EOF
 EOF
 
 echo "== clean install (bounded by EPISODIC_PACK_INSTALL_TIMEOUT, default 90s) =="
-if (cd "$WORK/cache" && timeout "${EPISODIC_PACK_INSTALL_TIMEOUT:-90s}" bun install --no-progress); then
+TIMEOUT_CMD=$(command -v timeout || command -v gtimeout || true)
+if [ -z "$TIMEOUT_CMD" ]; then
+  echo "warning: timeout/gtimeout not found; clean install is unbounded" >&2
+fi
+if (cd "$WORK/cache" && ${TIMEOUT_CMD:+"$TIMEOUT_CMD" "${EPISODIC_PACK_INSTALL_TIMEOUT:-90s}"} bun install --no-progress); then
   :
 else
   status=$?
