@@ -20,6 +20,9 @@
   "main": "./plugin/episodic-memory.ts",
   "exports": {
     ".": "./plugin/episodic-memory.ts",
+    "./server": "./plugin/v2.ts",
+    "./v1": "./plugin/episodic-memory.ts",
+    "./v2": "./plugin/v2.ts",
     "./cli": "./src/cli.ts"
   },
   "files": [
@@ -36,12 +39,14 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "verify:entrypoint": "bun run spikes/verify-opencode-entrypoint.ts",
-    "prepublishOnly": "bun run typecheck && bun test && bun run verify:entrypoint"
+    "verify:v2-entrypoint": "bun run spikes/entrypoint-smoke.ts",
+    "prepublishOnly": "bun run typecheck && bun test && bun run verify:entrypoint && bun run verify:v2-entrypoint"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",
     "@huggingface/transformers": "^4.2.0",
     "@opencode-ai/plugin": "^1.18.4",
+    "@opencode/plugin": "^2.0.18",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -1,6 +1,5 @@
 // Pre-publish guard: replicate OpenCode's npm-plugin server-entrypoint
-// resolution (plugin/shared.ts `resolvePackageEntrypoint`, kind="server") and
-// confirm the resolved entry loads and registers the memory tools.
+// resolution and confirm both V1 (main) and V2 (./server) entries load.
 //
 // Why this exists: OpenCode SILENTLY skips a plugin when its package.json has
 // neither exports["./server"] nor main — the loader marks it "missing" and the
@@ -59,9 +58,16 @@ console.log("server entrypoint:", entry);
 // (import(fileURL) of the resolved entry). Confirms the entry is real and loads.
 const entryPath = entry.startsWith("file://") ? entry : isAbsolute(entry) ? entry : resolve(dir, entry);
 const mod = await import(entryPath);
-const factory = mod.default ?? mod.EpisodicMemory;
+const plugin = mod.default;
+if (!plugin || typeof plugin !== "object" || plugin.id !== "episodic-memory" || typeof plugin.setup !== "function" || typeof plugin.server !== "function") {
+  throw new Error("shared server entry must expose V1 server() and V2 setup()");
+}
+const v1Entry = pkgJson.main;
+if (typeof v1Entry !== "string") throw new Error("V1 main entrypoint missing");
+const v1 = await import(resolve(dir, v1Entry));
+const factory = v1.default ?? v1.EpisodicMemory;
 if (typeof factory !== "function") {
-  throw new Error("resolved entry does not export a plugin factory (default / EpisodicMemory)");
+  throw new Error("V1 main entry does not export a plugin factory (default / EpisodicMemory)");
 }
 
 const hooks = await factory({ client: { app: { log: async () => {} } } });

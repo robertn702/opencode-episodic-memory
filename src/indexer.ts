@@ -1,7 +1,7 @@
 // Incremental, idempotent indexer. Watermark = session.time_updated; a session
 // is re-embedded only when the source changed since we last indexed it.
 import type { Database } from "bun:sqlite";
-import { getTranscriptChecked, listSessions, transcriptHasMarker, type SourceSession } from "./reader";
+import { getTranscriptChecked, listSessions, sessionLayout, transcriptHasMarker, type SourceSession } from "./reader";
 import { parseTranscript, exchangeText } from "./parser";
 import { embed } from "./embed";
 import type { IndexStore } from "./store";
@@ -35,7 +35,12 @@ export async function syncSession(
   }
   const prior = await index.getIndexedSession(s.id);
   if (await removeIfRemoteExcluded()) return "excluded";
-  if (!force && prior && prior.source_time_updated >= s.time_updated) return "fresh";
+  // The V1→V2 migration retains IDs and timestamps but changes the transcript
+  // representation. Persist the layout in status (also works for remote rows)
+  // so the first sync after either transition rebuilds anchors and text once.
+  const layout = sessionLayout(source, s.id);
+  const status = (kind: "indexed" | "excluded" | "empty") => layout === "v2" ? `${kind}-v2` : kind;
+  if (!force && prior && prior.status.endsWith("-v2") === (layout === "v2") && prior.source_time_updated >= s.time_updated) return "fresh";
 
   // Authoritative opt-out gate lives inside getTranscriptChecked (raw-blob
   // scan before any read); parseTranscript's own parsed-text check is a
@@ -54,12 +59,12 @@ export async function syncSession(
     // A remote index is an opt-in upload boundary: unlike the local index's
     // useful excluded tombstone, it must retain no metadata for marked chats.
     if (index.remote) await index.removeSession(s.id);
-    else await index.replaceSessionChunks(meta, [], "excluded");
+    else await index.replaceSessionChunks(meta, [], status("excluded"));
     return "excluded";
   }
   if (exchanges.length === 0) {
     if (await removeIfRemoteExcluded()) return "excluded";
-    await index.replaceSessionChunks(meta, [], "empty");
+    await index.replaceSessionChunks(meta, [], status("empty"));
     return "empty";
   }
 
@@ -74,7 +79,7 @@ export async function syncSession(
     meta,
     exchanges.map((e, i) => ({
       seq: i, time_created: e.time, text: texts[i], embedding: vectors[i], anchor_message_id: e.anchorMessageId,
-    }))
+    })), status("indexed")
   );
   return "indexed";
 }

@@ -411,13 +411,13 @@ export function stats(db: Database): IndexStats {
   }
   return {
     sessions: one<{ n: number }>("SELECT COUNT(*) n FROM sessions").n,
-    excluded: one<{ n: number }>("SELECT COUNT(*) n FROM sessions WHERE status != 'indexed'").n,
+    excluded: one<{ n: number }>("SELECT COUNT(*) n FROM sessions WHERE status NOT IN ('indexed', 'indexed-v2')").n,
     chunks: one<{ n: number }>("SELECT COUNT(*) n FROM chunks").n,
     oldest: one<{ t: number | null }>("SELECT MIN(time_created) t FROM chunks").t,
     newest: one<{ t: number | null }>("SELECT MAX(time_created) t FROM chunks").t,
     byDirectory: db
       .prepare<{ directory: string; n: number }, []>(
-        "SELECT directory, COUNT(*) n FROM sessions WHERE status = 'indexed' GROUP BY directory ORDER BY n DESC LIMIT 10"
+        "SELECT directory, COUNT(*) n FROM sessions WHERE status IN ('indexed', 'indexed-v2') GROUP BY directory ORDER BY n DESC LIMIT 10"
       )
       .all(),
   };
@@ -788,9 +788,9 @@ class RemoteIndexStore implements IndexStore {
   }
   async stats(): Promise<IndexStats> {
     const sessions = await this.client.execute("SELECT COUNT(*) AS n FROM episodic_sessions");
-    const excluded = await this.client.execute("SELECT COUNT(*) AS n FROM episodic_sessions WHERE status != 'indexed'");
+    const excluded = await this.client.execute("SELECT COUNT(*) AS n FROM episodic_sessions WHERE status NOT IN ('indexed', 'indexed-v2')");
     const chunks = await this.client.execute("SELECT COUNT(*) AS n, MIN(time_created) AS oldest, MAX(time_created) AS newest FROM episodic_chunks");
-    const directories = await this.client.execute("SELECT directory, COUNT(*) AS n FROM episodic_sessions WHERE status = 'indexed' GROUP BY directory ORDER BY n DESC LIMIT 10");
+    const directories = await this.client.execute("SELECT directory, COUNT(*) AS n FROM episodic_sessions WHERE status IN ('indexed', 'indexed-v2') GROUP BY directory ORDER BY n DESC LIMIT 10");
     const chunk = chunks.rows[0];
     if (!chunk) throw new Error("Remote stats query returned no row.");
     return { sessions: rowNumber(sessions.rows[0], "n"), excluded: rowNumber(excluded.rows[0], "n"), chunks: rowNumber(chunk, "n"), oldest: chunk.oldest === null ? null : rowNumber(chunk, "oldest"), newest: chunk.newest === null ? null : rowNumber(chunk, "newest"), byDirectory: directories.rows.map((row) => ({ directory: rowString(row, "directory"), n: rowNumber(row, "n") })) };

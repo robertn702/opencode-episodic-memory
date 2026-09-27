@@ -1,5 +1,5 @@
 // Read-only access to OpenCode's session store (opencode.db).
-// Schema (verified 2026-07-22): session / message / part tables, JSON blobs in `data`.
+// V1: session / message / part; V2: session_v2 / session_message.
 import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -36,6 +36,67 @@ const SessionRowSchema = z.object({
   time_updated: z.number(),
 });
 export type SourceSession = z.infer<typeof SessionRowSchema>;
+const V2SessionRowSchema = SessionRowSchema.extend({ title: z.string().nullable() });
+const V2MessageRowSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  seq: z.number().int(),
+  time_created: z.number(),
+  data: z.string(),
+});
+type V2MessageRow = z.infer<typeof V2MessageRowSchema>;
+const SeqRowSchema = z.object({ seq: z.number().int() });
+const TableNameSchema = z.object({ name: z.string() });
+const ColumnNameSchema = z.object({ name: z.string() });
+
+export type SourceLayout = "v1" | "v2";
+
+// A V2 migration keeps the V1 tables until completion. Prefer V2, but reject
+// incomplete layouts even when the other family is usable: otherwise old part
+// data could be silently skipped by the privacy scan.
+export function sourceLayout(db: Database): SourceLayout {
+  const tables = new Set(TableNameSchema.array().parse(
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()
+  ).map((row) => row.name));
+  const families: { names: string[]; columns: Record<string, string[]> }[] = [
+    { names: ["session", "message", "part"], columns: {
+      session: ["id", "project_id", "parent_id", "title", "directory", "time_created", "time_updated", "time_archived"],
+      message: ["id", "session_id", "time_created", "data"],
+      part: ["id", "message_id", "session_id", "time_created", "data"],
+    } },
+    { names: ["session_v2", "session_message"], columns: {
+      session_v2: ["id", "project_id", "parent_id", "title", "directory", "time_created", "time_updated", "time_archived"],
+      session_message: ["id", "session_id", "type", "seq", "time_created", "data"],
+    } },
+  ];
+  for (const family of families) {
+    if (!family.names.some((name) => tables.has(name))) continue;
+    const missing = family.names.filter((name) => !tables.has(name));
+    if (missing.length) throw new Error(`Incomplete OpenCode source layout: missing ${missing.join(", ")}`);
+    for (const name of family.names) {
+      const columns = new Set(ColumnNameSchema.array().parse(
+        db.prepare(`PRAGMA table_info(${name})`).all()
+      ).map((row) => row.name));
+      const required = family.columns[name];
+      const absent = required.filter((column) => !columns.has(column));
+      if (absent.length) throw new Error(`Incomplete OpenCode source layout: ${name} missing ${absent.join(", ")}`);
+    }
+  }
+  if (tables.has("session_v2")) return "v2";
+  if (tables.has("session")) return "v1";
+  throw new Error("Unknown OpenCode source layout: expected session/message/part or session_v2/session_message");
+}
+
+// During V1 migration the V2 tables may be only partially populated. Resolve
+// individual sessions against V2 when copied, otherwise retain their V1 rows.
+export function sessionLayout(db: Database, sessionId: string): SourceLayout {
+  const layout = sourceLayout(db);
+  if (layout === "v1") return layout;
+  const found = MarkerCountSchema.parse(db.prepare(
+    "SELECT COUNT(*) AS n FROM session_v2 WHERE id = ?"
+  ).get(sessionId)).n;
+  return found > 0 || !hasLegacyTables(db) ? "v2" : "v1";
+}
 
 const MessageRowSchema = z.object({
   id: z.string(),
@@ -104,23 +165,35 @@ function safeJsonParse(data: string): unknown {
 }
 
 export function listSessions(db: Database): SourceSession[] {
+  const table = sourceLayout(db) === "v2" ? "session_v2" : "session";
   const rows = db
     .prepare(
       `SELECT id, project_id, parent_id, title, directory, time_created, time_updated
-       FROM session WHERE time_archived IS NULL ORDER BY time_created`
+       FROM ${table} WHERE time_archived IS NULL ORDER BY time_created`
     )
     .all();
-  return SessionRowSchema.array().parse(rows);
+  if (table === "session") return SessionRowSchema.array().parse(rows);
+  const v2 = V2SessionRowSchema.array().parse(rows).map((row) => ({ ...row, title: row.title ?? "" }));
+  if (!hasLegacyTables(db)) return v2;
+  const remaining = SessionRowSchema.array().parse(db.prepare(
+    `SELECT id, project_id, parent_id, title, directory, time_created, time_updated FROM session
+     WHERE time_archived IS NULL AND NOT EXISTS (SELECT 1 FROM session_v2 WHERE session_v2.id = session.id)`
+  ).all());
+  return [...v2, ...remaining].sort((a, b) => a.time_created - b.time_created);
 }
 
 export function getSession(db: Database, sessionId: string): SourceSession | null {
+  const table = sessionLayout(db, sessionId) === "v2" ? "session_v2" : "session";
   const row = db
     .prepare(
       `SELECT id, project_id, parent_id, title, directory, time_created, time_updated
-       FROM session WHERE id = ?`
+       FROM ${table} WHERE id = ?`
     )
     .get(sessionId);
-  return row === null || row === undefined ? null : SessionRowSchema.parse(row);
+  if (row === null || row === undefined) return null;
+  if (table === "session") return SessionRowSchema.parse(row);
+  const session = V2SessionRowSchema.parse(row);
+  return { ...session, title: session.title ?? "" };
 }
 
 // AUTHORITATIVE exclusion check: bare-substring match over the RAW `data`
@@ -130,21 +203,37 @@ export function getSession(db: Database, sessionId: string): SourceSession | nul
 // depend on blob parseability. `instr` is an exact, case-sensitive substring
 // match (unlike LIKE, which is case-insensitive and has wildcard chars).
 export function transcriptHasMarker(db: Database, sessionId: string): boolean {
-  const row = MarkerCountSchema.parse(
-    db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM part
-         WHERE session_id = ? AND instr(data, ?) > 0`
-      )
-      .get(sessionId, EXCLUDE_MARKER)
-  );
-  return row.n > 0;
+  const layout = sourceLayout(db);
+  if (layout === "v2" && rawMarker(db, "session_message", sessionId)) return true;
+  // Even after migration, legacy rows may remain; never let their marker leak.
+  if (layout === "v1" || hasLegacyTables(db)) {
+    return rawMarker(db, "part", sessionId) || rawMarker(db, "message", sessionId);
+  }
+  return false;
+}
+
+function hasLegacyTables(db: Database): boolean {
+  return MarkerCountSchema.parse(db.prepare(
+    "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'part'"
+  ).get()).n > 0;
+}
+
+function rawMarker(db: Database, table: "session_message" | "part" | "message", sessionId: string): boolean {
+  return MarkerCountSchema.parse(db.prepare(
+    `SELECT COUNT(*) AS n FROM ${table} WHERE session_id = ? AND instr(data, ?) > 0`
+  ).get(sessionId, EXCLUDE_MARKER)).n > 0;
 }
 
 // Module-internal: the raw read with no privacy gate. Production code must go
 // through getTranscriptChecked so the exclusion marker can never be bypassed by
 // forgetting a manual transcriptHasMarker() call. Not exported.
 function getTranscript(db: Database, sessionId: string): SourceMessage[] {
+  if (sessionLayout(db, sessionId) === "v2") {
+    const rows = V2MessageRowSchema.array().parse(db.prepare(
+      "SELECT id, type, seq, time_created, data FROM session_message WHERE session_id = ? ORDER BY seq"
+    ).all(sessionId));
+    return rows.map((row) => materializeV2(row));
+  }
   const messages = MessageRowSchema.array().parse(
     db
       .prepare(
@@ -154,6 +243,42 @@ function getTranscript(db: Database, sessionId: string): SourceMessage[] {
       .all(sessionId)
   );
   return materializeMessages(db, sessionId, messages);
+}
+
+const V2DataSchema = z.object({
+  text: z.string().optional().catch(undefined),
+  content: z.array(z.unknown()).optional().catch(undefined),
+}).catch({});
+const V2ContentSchema = z.object({
+  type: z.string().catch("unknown"),
+  text: z.string().optional().catch(undefined),
+  name: z.string().optional().catch(undefined),
+}).catch({ type: "unknown" });
+
+function materializeV2(row: V2MessageRow, limits?: { maxPartBytes: number; maxPartsPerMessage: number }): SourceMessage {
+  const data = V2DataSchema.parse(safeJsonParse(row.data));
+  // V2 user text lives directly on data; assistant content is an inline array.
+  // Non-conversational events are retained as unknown and filtered by parser.ts.
+  const parts: SourcePart[] = row.type === "user" || row.type === "synthetic" || row.type === "system"
+    ? [{ type: "text", ...(data.text === undefined ? {} : { text: data.text }) }]
+    : row.type === "assistant"
+      ? (data.content ?? []).map((item) => {
+          const content = V2ContentSchema.parse(item);
+          if (content.type === "tool") return { type: "tool", ...(content.name === undefined ? {} : { tool: content.name }) };
+          return { type: content.type, ...(content.text === undefined ? {} : { text: content.text }) };
+        })
+      : [];
+  const selected = limits
+    ? parts.filter((part) => Buffer.byteLength(JSON.stringify(part)) <= limits.maxPartBytes).slice(0, limits.maxPartsPerMessage)
+    : parts;
+  const omitted = parts.length - selected.length;
+  return {
+    id: row.id,
+    role: row.type === "user" || row.type === "assistant" ? row.type : "unknown",
+    timeCreated: row.time_created,
+    parts: selected,
+    ...(omitted > 0 ? { contextPartsOmitted: omitted } : {}),
+  };
 }
 
 // Parse parts only for the supplied message rows. Full transcript reads pass
@@ -250,8 +375,10 @@ export type CheckedTranscript =
 // All production call sites (CLI read, plugin episodic_read_session, indexer) use this;
 // the raw getTranscript is module-internal.
 export function getTranscriptChecked(db: Database, sessionId: string): CheckedTranscript {
-  if (transcriptHasMarker(db, sessionId)) return { excluded: true };
-  return { excluded: false, messages: getTranscript(db, sessionId) };
+  return readSnapshot(db, () => {
+    if (transcriptHasMarker(db, sessionId)) return { excluded: true };
+    return { excluded: false, messages: getTranscript(db, sessionId) };
+  });
 }
 
 export const MAX_CONTEXT_MESSAGES = 20;
@@ -277,6 +404,31 @@ export function getTranscriptContext(
     if (transcriptHasMarker(db, sessionId)) return { ok: false, reason: "excluded" };
     const session = getSession(db, sessionId);
     if (!session) return { ok: false, reason: "unknown_session" };
+    if (sessionLayout(db, sessionId) === "v2") {
+      const anchorRow = db.prepare("SELECT seq FROM session_message WHERE session_id = ? AND id = ? AND type = 'user'").get(sessionId, anchorMessageId);
+      if (anchorRow === null || anchorRow === undefined) return { ok: false, reason: "invalid_anchor" };
+      const anchor = SeqRowSchema.parse(anchorRow);
+      const total = MarkerCountSchema.parse(db.prepare(
+        "SELECT COUNT(*) AS n FROM session_message WHERE session_id = ?"
+      ).get(sessionId)).n;
+      const anchorIndex = MarkerCountSchema.parse(db.prepare(
+        "SELECT COUNT(*) AS n FROM session_message WHERE session_id = ? AND seq < ?"
+      ).get(sessionId, anchor.seq)).n;
+      const sliceStart = Math.max(0, anchorIndex - before);
+      // V2 nests all parts in one JSON blob; dropping an oversized blob would
+      // also discard small neighboring text/tool parts. Bound selected rows and
+      // rendered parts, while retaining the structural data validation.
+      const rows = V2MessageRowSchema.array().parse(db.prepare(
+        "SELECT id, type, seq, time_created, data FROM session_message WHERE session_id = ? ORDER BY seq LIMIT ? OFFSET ?"
+      ).all(sessionId, Math.min(total, anchorIndex + after + 1) - sliceStart, sliceStart));
+      return {
+        ok: true, session, anchorIndex, sliceStart, total,
+        messages: rows.map((row) => materializeV2(row, {
+            maxPartBytes: MAX_CONTEXT_PART_BYTES,
+            maxPartsPerMessage: MAX_CONTEXT_PARTS_PER_MESSAGE,
+          })),
+      };
+    }
     const anchorRow = db.prepare("SELECT id, time_created FROM message WHERE session_id = ? AND id = ?").get(sessionId, anchorMessageId);
     if (anchorRow === null || anchorRow === undefined) return { ok: false, reason: "invalid_anchor" };
     const anchor = AnchorRowSchema.parse(anchorRow);

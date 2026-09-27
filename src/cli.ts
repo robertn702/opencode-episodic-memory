@@ -12,7 +12,7 @@
 //   doctor                         Diagnose setup
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { openSource, sourceDbPath, getSession, getTranscriptChecked } from "./reader";
+import { openSource, sourceDbPath, sourceLayout, listSessions, getSession, getTranscriptChecked } from "./reader";
 import { openConfiguredIndex, indexDbPath, type IndexStore } from "./store";
 import { syncAll } from "./indexer";
 import { embed, embedQuery, getEmbedMode } from "./embed";
@@ -197,8 +197,10 @@ async function main() {
       else { console.error(`✗ source DB missing: ${src}`); ok = false; }
       try {
         const source = openSource();
-        const n = source.prepare<{ n: number }, []>("SELECT COUNT(*) n FROM session").get()?.n ?? 0;
-        console.log(`✓ source readable: ${n} sessions`);
+        try {
+          const layout = sourceLayout(source);
+          console.log(`✓ source readable: ${listSessions(source).length} active sessions (${layout})`);
+        } finally { source.close(); }
       } catch (e) { console.error(`✗ source unreadable: ${e}`); ok = false; }
       try {
         const idx = await openConfiguredIndex();
