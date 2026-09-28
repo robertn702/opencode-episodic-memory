@@ -1,12 +1,20 @@
 // OpenCode plugin: episodic memory over past conversations.
 // - Native tools: episodic_search, episodic_read_window, episodic_read_session
 // - Incremental reindex on session.idle (fire-and-forget, debounced)
-import { tool } from "@opencode-ai/plugin";
+import { z } from "zod";
 import { openSource, getSession, getTranscriptChecked, getTranscriptContext, transcriptHasMarker } from "../src/reader";
 import { canLiveRead, openConfiguredIndex, remoteIndexConfig, type IndexStore } from "../src/store";
 import { syncSession, syncAll, pruneOrphans } from "../src/indexer";
 import { embedQuery } from "../src/embed";
 import { parseDateArg, formatHits, renderTranscript, renderTranscriptContext, renderIndexedContext } from "../src/format";
+
+function defineTool<S extends z.ZodRawShape>(definition: {
+  description: string;
+  args: S;
+  execute: (args: z.infer<z.ZodObject<S>>) => Promise<string>;
+}) {
+  return { ...definition, execute: (input: unknown) => definition.execute(z.object(definition.args).parse(input)) };
+}
 
 export function createMemory(log: (level: "info" | "warn" | "error", message: string) => Promise<void>) {
   const remoteSearch = Boolean(process.env.EPISODIC_INDEX_URL);
@@ -60,19 +68,19 @@ export function createMemory(log: (level: "info" | "warn" | "error", message: st
   return {
     reindex,
     tools: {
-      episodic_search: tool({
+      episodic_search: defineTool({
         description:
           "Semantic search over your PAST OpenCode conversations. Use when the user references prior work, past decisions, or previous sessions (e.g. 'how did we handle X', 'the conversation about Y', 'what did we decide about Z'). Returns dated excerpts, session IDs, and anchors. Prefer episodic_search -> episodic_read_window for bounded context -> episodic_read_session only when more context is needed." +
           (remoteSearch ? " Remote index: vector search only, without text filtering. Preserve source_id when reading hits; foreign-source windows contain indexed excerpts, not live messages." : ""),
         args: {
-          query: tool.schema.string().describe("Natural-language description of what you're looking for"),
-          ...(!remoteSearch ? { text: tool.schema.string().optional().describe("Exact substring to require in results (ANDed with semantic ranking)") } : {}),
-          mode: tool.schema.enum(remoteSearch ? ["vector"] : ["vector", "text", "hybrid"]).optional().describe(remoteSearch
+          query: z.string().describe("Natural-language description of what you're looking for"),
+          ...(!remoteSearch ? { text: z.string().optional().describe("Exact substring to require in results (ANDed with semantic ranking)") } : {}),
+          mode: z.enum(remoteSearch ? ["vector"] : ["vector", "text", "hybrid"]).optional().describe(remoteSearch
             ? "'vector' (default): the only supported remote mode. Scores are cosine (~0.4-0.7)."
             : "'vector' (default) semantic search, scores are cosine (~0.4–0.7); 'text' lexical BM25; 'hybrid' fuses both via RRF (may surface lexical noise) — note hybrid hits carry fused RRF scores (~0.03), a DIFFERENT scale from cosine, so don't judge them against the vector thresholds"),
-          after: tool.schema.string().optional().describe("Only conversations after YYYY-MM-DD"),
-          before: tool.schema.string().optional().describe("Only conversations before YYYY-MM-DD"),
-          limit: tool.schema.number().optional().describe("Max results, 1-50 (default 10)"),
+          after: z.string().optional().describe("Only conversations after YYYY-MM-DD"),
+          before: z.string().optional().describe("Only conversations before YYYY-MM-DD"),
+          limit: z.number().optional().describe("Max results, 1-50 (default 10)"),
         },
         async execute(args) {
           if (remoteIndexConfig() && (args.mode === "text" || args.mode === "hybrid" || args.text !== undefined)) {
@@ -115,15 +123,15 @@ export function createMemory(log: (level: "info" | "warn" | "error", message: st
         },
       }),
 
-      episodic_read_window: tool({
+      episodic_read_window: defineTool({
         description:
           "Read bounded context around an anchor from episodic_search. Preserve session_id, anchor_message_id, and source_id. Current-source hits use privacy-gated live messages; foreign-source hits use labeled indexed condensed exchanges that may be stale. Missing or stale anchors cannot provide a window; use episodic_read_session with source_id and indexed: true for indexed excerpts instead.",
         args: {
-          session_id: tool.schema.string().describe("Session ID from episodic_search, e.g. ses_..."),
-          source_id: tool.schema.string().optional().describe("Source ID shown by remote episodic_search results; required for remote indexes"),
-          anchor_message_id: tool.schema.string().describe("Anchor message ID from episodic_search"),
-          before: tool.schema.number().optional().describe("Messages before the anchor, or indexed chunks for a foreign source, 0-20 (default 3)"),
-          after: tool.schema.number().optional().describe("Messages after the anchor, or indexed chunks for a foreign source, 0-20 (default 3)"),
+          session_id: z.string().describe("Session ID from episodic_search, e.g. ses_..."),
+          source_id: z.string().optional().describe("Source ID shown by remote episodic_search results; required for remote indexes"),
+          anchor_message_id: z.string().describe("Anchor message ID from episodic_search"),
+          before: z.number().optional().describe("Messages before the anchor, or indexed chunks for a foreign source, 0-20 (default 3)"),
+          after: z.number().optional().describe("Messages after the anchor, or indexed chunks for a foreign source, 0-20 (default 3)"),
         },
         async execute(args) {
           const remote = remoteIndexConfig();
@@ -155,13 +163,13 @@ export function createMemory(log: (level: "info" | "warn" | "error", message: st
         },
       }),
 
-      episodic_read_session: tool({
+      episodic_read_session: defineTool({
         description:
           "Read the full transcript of a past OpenCode session, given a session ID (from episodic_search results). Use after episodic_read_window when the bounded window is insufficient. Reconstructs from the live session store; falls back to indexed excerpts if the session was deleted.",
         args: {
-          session_id: tool.schema.string().describe("Session ID, e.g. ses_..."),
-          source_id: tool.schema.string().optional().describe("Source ID shown by remote episodic_search results"),
-          indexed: tool.schema.boolean().optional().describe("Force reading from the index instead of the live session store"),
+          session_id: z.string().describe("Session ID, e.g. ses_..."),
+          source_id: z.string().optional().describe("Source ID shown by remote episodic_search results"),
+          indexed: z.boolean().optional().describe("Force reading from the index instead of the live session store"),
         },
         async execute(args) {
           const remote = remoteIndexConfig();

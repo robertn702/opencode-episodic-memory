@@ -1,37 +1,25 @@
-# OpenCode v1 and v2 compatibility
+# OpenCode v2 source compatibility
 
-The package supports the v1 `session` / `message` / `part` layout and the
-[v2.0.18 schema](https://github.com/anomalyco/opencode/blob/v2.0.18/packages/core/src/session/sql.ts)
-(`session_v2` / `session_message`). The v2 reader normalizes nullable titles,
-user `data.text`, assistant `data.content[]` text and tool names to the same
-parser contract as v1. Unknown or partial layouts fail before sync/pruning.
-When both table families exist during migration, v2 is authoritative for
-each copied session; unconverted sessions continue reading v1 and stay in the
-pruning set. The exclusion marker is scanned in raw v2 message data **and**
-retained v1 message/part data, including malformed JSON. Full transcript reads
-and seq-ordered bounded windows pin privacy checks and reads to one snapshot.
+This package requires OpenCode v2. The reader uses `session_v2` and
+`session_message` only. It validates their required columns before syncing or
+pruning, normalizes nullable session titles, and reads user `data.text` plus
+assistant `data.content[]` text and tool names. Malformed JSON degrades per
+message; malformed structural rows fail loudly.
 
 The [upstream migration](https://github.com/anomalyco/opencode/blob/v2.0.18/packages/core/src/database/v1-migration.bun.ts)
-can retain v1 tables and preserve session IDs/timestamps. Indexed session
-status therefore records the layout (`indexed-v2`, `empty-v2`, `excluded-v2`);
-the first sync after a layout switch reprocesses even unchanged timestamps.
-Deleted sessions are pruned only after source layout validation. Run
-`bun run src/cli.ts sync` to backfill, or rely on per-session idle reindexing;
-`doctor` reports the detected layout. V1 reads and existing v1 statuses remain
-compatible.
+copies old sessions into the v2 tables while preserving IDs and timestamps.
+OpenCode may retain the old tables, but this package never reads them. Finish
+OpenCode's migration before using this version. On the first sync, index rows
+with older unqualified statuses are reprocessed as `indexed-v2`, `empty-v2`, or
+`excluded-v2`, even when their source timestamp has not changed. Deleted
+sessions are pruned only after v2 layout validation.
 
-OpenCode v1.18.32 and v2.0.18 both prioritize `exports["./server"]`. The
-shared server entry exposes v1 `server()` and v2 `setup()`; older v1 hosts can
-use the v1 function `main`. The root export remains v1; explicit `./v1` and
-`./v2` subpaths are available. These
-entrypoints share three tool implementations and the same index. The v1 path
-keeps `@opencode-ai/plugin` compatibility with earlier 1.x installations;
-entrypoint checks exercise the tagged 1.18.4/1.18.28/1.18.32 and 2.0.18
-resolver contracts, not every historical host. Minimum verified v1 loader:
-1.18.4.
+The privacy gate checks the exact marker substring across raw
+`session_message.data` for the entire session before reading a transcript or
+bounded window. This catches markers inside malformed JSON and unmodeled
+nested fields. Both the marker check and transcript read use one SQLite
+snapshot.
 
-The index contains condensed text and tool names, not tool arguments or output.
-Search results preserve dates and anchors; later decisions do not automatically
-invalidate older ones. Live transcript tools expose more context when available,
-subject to the raw exclusion-marker gate; foreign-source indexed excerpts may
-be stale.
+The package's root and `./server` exports resolve to the same v2
+`Plugin.define` entrypoint. OpenCode v1 plugin APIs and source layouts are no
+longer supported.

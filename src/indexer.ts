@@ -1,7 +1,7 @@
 // Incremental, idempotent indexer. Watermark = session.time_updated; a session
 // is re-embedded only when the source changed since we last indexed it.
 import type { Database } from "bun:sqlite";
-import { getTranscriptChecked, listSessions, sessionLayout, transcriptHasMarker, type SourceSession } from "./reader";
+import { getTranscriptChecked, listSessions, transcriptHasMarker, type SourceSession } from "./reader";
 import { parseTranscript, exchangeText } from "./parser";
 import { embed } from "./embed";
 import type { IndexStore } from "./store";
@@ -35,12 +35,10 @@ export async function syncSession(
   }
   const prior = await index.getIndexedSession(s.id);
   if (await removeIfRemoteExcluded()) return "excluded";
-  // The V1→V2 migration retains IDs and timestamps but changes the transcript
-  // representation. Persist the layout in status (also works for remote rows)
-  // so the first sync after either transition rebuilds anchors and text once.
-  const layout = sessionLayout(source, s.id);
-  const status = (kind: "indexed" | "excluded" | "empty") => layout === "v2" ? `${kind}-v2` : kind;
-  if (!force && prior && prior.status.endsWith("-v2") === (layout === "v2") && prior.source_time_updated >= s.time_updated) return "fresh";
+  // Earlier indexes used unqualified statuses. Force one v2 reindex even when
+  // migrated sessions retain their IDs and timestamps.
+  const status = (kind: "indexed" | "excluded" | "empty") => `${kind}-v2`;
+  if (!force && prior?.status.endsWith("-v2") && prior.source_time_updated >= s.time_updated) return "fresh";
 
   // Authoritative opt-out gate lives inside getTranscriptChecked (raw-blob
   // scan before any read); parseTranscript's own parsed-text check is a

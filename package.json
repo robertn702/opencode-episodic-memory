@@ -1,6 +1,6 @@
 {
   "name": "opencode-episodic-memory",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Semantic search over past OpenCode conversations — local embeddings (Transformers.js), SQLite index, native plugin tools. Inspired by obra/episodic-memory, rebuilt natively for OpenCode.",
   "type": "module",
   "license": "MIT",
@@ -17,11 +17,10 @@
     "embeddings",
     "transformersjs"
   ],
-  "main": "./plugin/episodic-memory.ts",
+  "main": "./plugin/v2.ts",
   "exports": {
-    ".": "./plugin/episodic-memory.ts",
+    ".": "./plugin/v2.ts",
     "./server": "./plugin/v2.ts",
-    "./v1": "./plugin/episodic-memory.ts",
     "./v2": "./plugin/v2.ts",
     "./cli": "./src/cli.ts"
   },
@@ -39,13 +38,11 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "verify:entrypoint": "bun run spikes/verify-opencode-entrypoint.ts",
-    "verify:v2-entrypoint": "bun run spikes/entrypoint-smoke.ts",
-    "prepublishOnly": "bun run typecheck && bun test && bun run verify:entrypoint && bun run verify:v2-entrypoint"
+    "prepublishOnly": "bun run typecheck && bun test && bun run verify:entrypoint"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",
     "@huggingface/transformers": "^4.2.0",
-    "@opencode-ai/plugin": "^1.18.4",
     "@opencode/plugin": "^2.0.18",
     "zod": "^4.4.3"
   },

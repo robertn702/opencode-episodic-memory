@@ -8,7 +8,7 @@ Semver while 0.x: breaking changes bump minor, fixes bump patch.
 2. Bump `version` in `package.json`, and update every version pin in `README.md`
    (plugin install, config snippet, manual skill-copy cache path, `bunx`
    commands) to match — grep for the old `@X.Y.Z` to catch them all.
-3. `bun install && bun run typecheck && bun test && bun run spikes/plugin-harness.ts`
+3. `bun install && bun run typecheck && bun test && bun run spikes/entrypoint-smoke.ts`
    (`prepublishOnly` remains a backstop for manual directory publishes; the
    workflow publishes a preverified tarball and runs these gates explicitly).
 4. `bash spikes/pack-smoke.sh` — packs the tarball and verifies it cleanly
