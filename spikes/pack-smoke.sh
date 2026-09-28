@@ -2,8 +2,8 @@
 # Verify the actual publish artifact before `npm publish`: pack the tarball,
 # install it into a clean dir exactly the way OpenCode installs npm plugins
 # (bun install, postinstalls untrusted), then import the plugin entry and run
-# a real Node-sidecar embedding. This is the check that caught @opencode-ai/plugin being a
-# devDependency — dependency-placement bugs only surface from a clean install.
+# a real Node-sidecar embedding. Dependency-placement bugs only surface
+# from a clean install.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -36,7 +36,7 @@ fi
 echo "== import plugin entry =="
 (cd "$WORK/cache" && bun -e "
 const m = await import('opencode-episodic-memory');
-if (typeof m.EpisodicMemory !== 'function') throw new Error('EpisodicMemory export missing');
+if (m.default?.id !== 'episodic-memory' || typeof m.default.setup !== 'function') throw new Error('v2 plugin export missing');
 console.log('exports ok:', Object.keys(m).join(', '));
 ")
 

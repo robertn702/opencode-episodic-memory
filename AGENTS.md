@@ -8,7 +8,7 @@ Semantic search over past OpenCode conversations via native plugin tools.
 - `ARCHITECTURE.md` — system overview with Mermaid diagrams (data model,
   write/read paths, design decisions); keep in sync when changing the pipeline
 - `src/reader.ts` — read-only access to `~/.local/share/opencode/opencode.db`
-  (v1 session/message/part or v2 session_v2/session_message, JSON blobs in `data`)
+  (v2 session_v2/session_message, JSON blobs in `data`)
 - `src/parser.ts` — transcript → condensed exchanges; exclusion marker handling
 - `src/embed.ts` — embedding host/client; lazy Node sidecar by default
 - `src/embed-sidecar.mjs` — persistent Node 20+ Transformers.js server (NDJSON)
@@ -19,7 +19,7 @@ Semantic search over past OpenCode conversations via native plugin tools.
   embeddings/BM25 only, hydrate text/title/directory/source anchor for the top-K winners.
 - `src/indexer.ts` — incremental sync, watermark = `session.time_updated`
 - `src/cli.ts` — `bun run src/cli.ts sync|search|read|stats|doctor`
-- `plugin/episodic-memory.ts`, `plugin/v2.ts`, `plugin/shared.ts` — V1/V2 entrypoints and shared tools + `session.idle` reindex
+- `plugin/v2.ts`, `plugin/shared.ts` — v2 entrypoint and tools + `session.idle` reindex
 - `skills/remembering-conversations/SKILL.md` — recall-behavior skill
 - `docs/embedding-model-eval.md` — model survey + empirical eval behind the
   snowflake choice
@@ -90,11 +90,11 @@ Semantic search over past OpenCode conversations via native plugin tools.
   chunks).
 - OpenCode sessions live in one SQLite DB (WAL mode; concurrent read-only access
   is safe), NOT JSONL transcripts like Claude Code.
-- The v2.0.18 source uses `session_v2` / `session_message` and nested content.
-  During migration the old tables remain and sessions are copied incrementally;
-  reader and pruning must retain unmigrated v1 sessions. Session status suffix
-  `-v2` forces reindex after migration despite preserved IDs/timestamps. See
-  `docs/opencode-2-compatibility.md` before changing privacy/anchor handling.
+- The v2 source uses `session_v2` / `session_message` and nested content.
+  OpenCode's migration copies old sessions into these tables, retaining IDs and
+  timestamps. Runtime reads require complete v2 tables and ignore retained
+  v1 tables. The `-v2` index status forces one reindex of older statuses.
+  See `docs/opencode-2-compatibility.md` before changing privacy/anchor handling.
 - Runtime validation of `opencode.db` reads uses **Zod** (`src/reader.ts`), split
   by failure mode: **structural rows** (`listSessions`/`getSession`/`getTranscript`
   row envelopes — the id/time_created/data columns) **throw** via `.parse()`, so
@@ -137,18 +137,13 @@ Semantic search over past OpenCode conversations via native plugin tools.
   parser.ts is a cheaper parsed-text fast path kept for parseTranscript's
   in-memory flow; EXCLUDE_MARKER lives in reader.ts and is re-exported by
   parser.ts.
-- V1 plugin API uses `tool()` from `@opencode-ai/plugin`; v2 uses
-  `Plugin.define` from `@opencode/plugin`. Both v1.18.32 and v2.0.18 resolve
-  `exports["./server"]` first: its default exposes v1 `server()` and v2 `setup()`.
-  different-ai/openwork's skills (`opencode-primitives`, `create-plugin`) show
-  an older default-export/zod-shape style and one was removed upstream while
-  skills.sh served a stale snapshot — don't vendor them; the official style is
-  what's implemented here.
+- The v2 plugin uses `Plugin.define` from `@opencode/plugin` and exports the
+  same definition from root and `./server`. No v1 runtime adapter remains.
 
 ## Conventions
 
 - Verify empirically before building (see `spikes/`); run
-  `bun run spikes/plugin-harness.ts` after changing the plugin.
+  `bun run spikes/entrypoint-smoke.ts` after changing the plugin.
 - When bumping `@huggingface/transformers`, capture baseline embeddings
   pre-bump and compare cosine post-bump before assuming existing indexes stay
   valid (v3↔v4 happened to be identical; don't assume that holds).

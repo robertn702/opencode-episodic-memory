@@ -19,7 +19,7 @@ thin front-ends: an OpenCode plugin (agent tools + auto-reindex) and a CLI
 ```mermaid
 flowchart LR
     subgraph Source["Source (read-only)"]
-        OCDB[("~/.local/share/opencode/<br/>opencode.db<br/>v1 or v2 source tables")]
+        OCDB[("~/.local/share/opencode/<br/>opencode.db<br/>v2 source tables")]
     end
 
     subgraph BunHost["OpenCode / CLI Bun host"]
@@ -39,7 +39,7 @@ flowchart LR
     end
 
     subgraph Frontends["Front-ends"]
-        PLG[plugin/v1 + v2 entrypoints<br/>episodic_search · episodic_read_window · episodic_read_session<br/>session.idle reindex]
+        PLG[plugin/v2.ts entrypoint<br/>episodic_search · episodic_read_window · episodic_read_session<br/>session.idle reindex]
         CLI[src/cli.ts<br/>sync · search · read · stats · doctor]
     end
 
@@ -82,7 +82,7 @@ eviction therefore includes model-loading latency.
 
 | Module | Role | Key exports |
 |---|---|---|
-| `src/reader.ts` | Read-only v1/v2 adapters for `opencode.db`. Zod validation; **authoritative privacy gate** | `sourceLayout`, `listSessions`, `getSession`, `getTranscriptChecked`, `getTranscriptContext`, `transcriptHasMarker`, `EXCLUDE_MARKER` |
+| `src/reader.ts` | Read-only v2 adapter for `opencode.db`. Zod validation; **authoritative privacy gate** | `sourceLayout`, `listSessions`, `getSession`, `getTranscriptChecked`, `getTranscriptContext`, `transcriptHasMarker`, `EXCLUDE_MARKER` |
 | `src/parser.ts` | Transcript → condensed `Exchange[]` (user text, assistant text, tool names) | `parseTranscript`, `exchangeText`, `hasExcludeMarker` (fast path) |
 | `src/embed.ts` | Embedding API + Node-sidecar client. Prepares text, manages one lazy child and its idle eviction, and validates protocol vectors without importing Transformers.js | `embed` (docs), `embedQuery` (adds retrieval prefix), `QUERY_PREFIX`, `MAX_CHARS` |
 | `src/embed-sidecar.mjs` | Plain Node ESM NDJSON server; dynamically imports Transformers.js and holds the pipeline while warm | protocol `{id,texts}` -> `{id,vectors}` / `{id,error}` |
@@ -91,7 +91,7 @@ eviction therefore includes model-loading latency.
 | `src/indexer.ts` | Incremental, idempotent sync; watermark-based; source-scoped remote pruning | `syncSession`, `syncAll`, `pruneOrphans` |
 | `src/format.ts` | Shared presentation for CLI + plugin | `parseDateArg`, `renderTranscript`, `renderTranscriptContext`, `formatHits` |
 | `src/cli.ts` | `opencode-episodic` binary: sync / search / read / stats / doctor | — |
-| `plugin/episodic-memory.ts`, `plugin/v2.ts`, `plugin/shared.ts` | V1 function and V2 `Plugin.define` registration; shared tools + `session.idle` reindex | `EpisodicMemory`, V2 default export |
+| `plugin/v2.ts`, `plugin/shared.ts` | V2 `Plugin.define` registration; tools + `session.idle` reindex | V2 default export |
 | `skills/remembering-conversations/` | Skill teaching the agent when to invoke the tools | — |
 
 ## Data model
@@ -102,17 +102,16 @@ any time (`sync --force`).
 
 ### Source: `opencode.db` (read-only, owned by OpenCode)
 
-The reader explicitly detects the source layout before reading or pruning.
-OpenCode v2.0.18 uses `session_v2` (nullable title) and `session_message`
-(`type`, `seq`, JSON `data` with user `text` or assistant `content[]`). V2
-windows order by sequence and the raw marker scan also checks retained v1
-message and part data when those tables coexist. See
-[OpenCode 2.0 compatibility](docs/opencode-2-compatibility.md).
+The reader validates the v2 source layout before reading or pruning. OpenCode
+v2.0.18 uses `session_v2` (nullable title) and `session_message` (`type`,
+`seq`, JSON `data` with user `text` or assistant `content[]`). Windows order
+by sequence. The raw privacy scan examines every v2 message blob in the
+session, including malformed JSON. Retained v1 tables are ignored after
+OpenCode has copied old sessions into v2.
 
 ```
-session (id, project_id, parent_id, title, directory, time_created, time_updated, time_archived)
-message (id, session_id, time_created, data)   -- data = JSON blob: {role, ...}
-part    (id, session_id, message_id, time_created, data)  -- data = JSON blob: {type, text?, tool?}
+session_v2 (id, project_id, parent_id, title, directory, time_created, time_updated, time_archived)
+session_message (id, session_id, type, seq, time_created, data)
 ```
 
 Validation strategy is split by failure mode (enforced in `reader.ts`):
@@ -146,9 +145,10 @@ chunks_fts  FTS5 virtual table, external content over chunks.text,
   load dynamic extensions, so sqlite-vec is impossible inside the plugin; FTS5
   is compiled in, which is why lexical BM25 *is* available.
 - `source_time_updated` is the incremental-sync watermark; the status suffix
-  `-v2` records the per-session source layout. A layout switch re-embeds even when v1→v2
-  migration preserves the same timestamps and IDs. Both local and remote indexes
-  recognize `indexed-v2` as indexed; no chunks-table rebuild or VACUUM occurs.
+  `-v2` distinguishes v2 indexes from older unqualified statuses. The first
+  v2 sync re-embeds even when migration preserves timestamps and IDs. Both
+  local and remote indexes recognize `indexed-v2` as indexed; no chunks-table
+  rebuild or VACUUM occurs.
 - `status` records why a session has no chunks (`indexed` | `excluded` |
   `empty`) and keeps a tombstone row (metadata only) so stats can report
   excluded/empty sessions. A changed session is always re-read and re-checked
@@ -364,7 +364,7 @@ docs/      embedding-model eval, alternatives survey, release process
 
 - `bun test` — parser/store/reader tests plus offline fake-sidecar protocol and lifecycle tests
 - `bun run typecheck` — `tsc --noEmit`
-- `bun run spikes/plugin-harness.ts` — plugin smoke harness; run after changing
+- `bun run spikes/entrypoint-smoke.ts` — plugin smoke harness; run after changing
   the plugin
 - `bash spikes/pack-smoke.sh` — release gate: pack → clean install → import →
   real Node-sidecar embed (including the packaged `.mjs` sidecar)
