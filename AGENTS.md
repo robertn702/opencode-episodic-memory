@@ -19,7 +19,7 @@ Semantic search over past OpenCode conversations via native plugin tools.
   embeddings/BM25 only, hydrate text/title/directory/source anchor for the top-K winners.
 - `src/indexer.ts` — incremental sync, watermark = `session.time_updated`
 - `src/cli.ts` — `bun run src/cli.ts sync|search|read|stats|doctor`
-- `plugin/v2.ts`, `plugin/shared.ts` — v2 entrypoint and tools + `session.idle` reindex
+- `plugin/v2.ts`, `plugin/shared.ts` — v2 entrypoint and tools + settled-session reindex; `plugin/log.ts` appends to OpenCode's log file
 - `skills/remembering-conversations/SKILL.md` — recall-behavior skill
 - `docs/embedding-model-eval.md` — model survey + empirical eval behind the
   snowflake choice
@@ -46,7 +46,7 @@ Semantic search over past OpenCode conversations via native plugin tools.
   401 now — use official repos' own ONNX exports.
 - Truncate embedded text at 2000 chars (upstream measured quality peaks there);
   the stored chunk text may be longer for display, embed.ts truncates.
-- Sync (CLI `sync` and the plugin's per-session `session.idle` reindex alike)
+- Sync (CLI `sync` and the plugin's per-session settled-session reindex alike)
   prunes index sessions that no longer exist in the source DB (deleted
   conversations would otherwise linger with stale-model embeddings), and search
   skips embedding rows whose byteLength ≠ dims×4 — a mixed-model index can never
@@ -105,7 +105,7 @@ Semantic search over past OpenCode conversations via native plugin tools.
   Because the internal `getTranscript` throws on structural drift and `syncAll`
   reads every session through `getTranscriptChecked` (which calls it), a
   structural drift aborts the whole bulk sync (all-or-nothing) —
-  intentional fail-loud; the plugin's `session.idle` reindex catches and logs it.
+  intentional fail-loud; the plugin's background reindex catches and logs it.
   The index DB (`store.ts`) deliberately stays on `db.prepare<T>()` typed casts —
   we own that schema end to end, so runtime validation adds no value there. Keep
   the no-`as` rule: narrow via schemas, never assertions (the two documented

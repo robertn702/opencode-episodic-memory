@@ -21,7 +21,7 @@ of the OpenCode memory-plugin landscape? See
 3. **Embed** — local, offline embeddings via Transformers.js in a lazily started, idle-evictable system-Node sidecar (`Snowflake/snowflake-arctic-embed-m-v1.5` q8, 768 dims; retrieval prefix on search queries). Chosen by empirical eval on a real corpus — see [docs/embedding-model-eval.md](docs/embedding-model-eval.md)
 4. **Index** — plain SQLite at `~/.local/share/opencode-episodic-memory/index.db` by default; optional libSQL/Turso remote storage can combine source-scoped indexes across devices
 5. **Recall** — native plugin tools `episodic_search` / `episodic_read_window` / `episodic_read_session`, plus a `remembering-conversations` skill that teaches the agent when to search
-6. **Stay fresh** — the plugin re-indexes each session on the `session.idle` event
+6. **Stay fresh** — the plugin re-indexes each session when OpenCode reports its execution settled (`session.execution.succeeded` / `failed` / `interrupted`), and backfills a local index on startup. With a remote index, run `sync` from the CLI to backfill sessions that settled while the plugin was not indexing. Plugin log lines go to OpenCode's own log file (`$XDG_DATA_HOME/opencode/log/opencode.log`, default `~/.local/share/opencode/log/`), prefixed `[episodic-memory]`
 
 OpenCode v2 is required. The reader uses `session_v2` and `session_message`;
 existing index rows are refreshed on the first v2 sync, even when migration
@@ -202,7 +202,9 @@ freshness guarantees across devices.
 
 Network failures are surfaced by the CLI and doctor; plugin background reindex
 logs failures and never silently falls back to a local index (which would split
-history). To return to local-only mode, unset `EPISODIC_INDEX_URL`,
+history). The plugin does not backfill a remote index on startup: that scan reads
+every transcript and makes a network round trip per session. Run `sync` after
+upgrading from 0.4.0 to index sessions that version missed. To return to local-only mode, unset `EPISODIC_INDEX_URL`,
 `EPISODIC_INDEX_AUTH_TOKEN`, and `EPISODIC_SOURCE_ID`; the existing local index
 is selected unchanged. Re-run `sync` if the local index needs rebuilding.
 

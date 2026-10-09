@@ -1,9 +1,16 @@
 // Verify the v2 plugin definition and tool registration without starting OpenCode.
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const dir = process.argv[2] ?? process.cwd();
+// setup() starts a backfill and writes OpenCode log lines; keep both away from real data.
+const scratch = mkdtempSync(join(tmpdir(), "episodic-entrypoint-smoke-"));
+process.env.XDG_DATA_HOME = scratch;
+process.env.EPISODIC_SOURCE_DB = join(scratch, "missing-opencode.db");
+process.env.EPISODIC_INDEX_DB = join(scratch, "index.db");
+delete process.env.EPISODIC_INDEX_URL;
 const pkg = JSON.parse(readFileSync(resolve(dir, "package.json"), "utf8"));
 const entry = pkg.exports?.["./server"];
 if (typeof entry !== "string" || pkg.main !== entry || pkg.exports?.["."] !== entry) {
@@ -16,6 +23,7 @@ if (mod.default?.id !== "episodic-memory" || typeof mod.default.setup !== "funct
 const definitions: Array<{ name: string; input: { properties?: Record<string, unknown>; required?: string[] }; execute: Function }> = [];
 let signal: AbortSignal | undefined;
 const ctx = {
+  app: { name: "smoke", version: "0", channel: "latest" },
   location: { directory: dir },
   tool: { transform: async (edit: Function) => {
     edit({ add: (definition: typeof definitions[number]) => definitions.push(definition) });

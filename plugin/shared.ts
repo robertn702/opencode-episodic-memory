@@ -1,6 +1,6 @@
 // OpenCode plugin: episodic memory over past conversations.
 // - Native tools: episodic_search, episodic_read_window, episodic_read_session
-// - Incremental reindex on session.idle (fire-and-forget, debounced)
+// - Incremental reindex when a session settles (fire-and-forget, debounced)
 import { z } from "zod";
 import { openSource, getSession, getTranscriptChecked, getTranscriptContext, transcriptHasMarker } from "../src/reader";
 import { canLiveRead, openConfiguredIndex, remoteIndexConfig, type IndexStore } from "../src/store";
@@ -16,6 +16,12 @@ function defineTool<S extends z.ZodRawShape>(definition: {
   return { ...definition, execute: (input: unknown) => definition.execute(z.object(definition.args).parse(input)) };
 }
 
+// Debounce concurrent reindex runs for the same session. Module-scoped because
+// OpenCode v2 creates one plugin instance per location, and each one starts a
+// backfill; the runs must coalesce rather than embed the same backlog repeatedly.
+const inflight = new Map<string, Promise<void>>();
+const pending = new Set<string>();
+
 export function createMemory(log: (level: "info" | "warn" | "error", message: string) => Promise<void>) {
   const remoteSearch = Boolean(process.env.EPISODIC_INDEX_URL);
   let configuredIndex: Promise<IndexStore> | undefined;
@@ -24,9 +30,6 @@ export function createMemory(log: (level: "info" | "warn" | "error", message: st
     throw error;
   });
 
-  // Debounce concurrent reindex runs for the same session.
-  const inflight = new Map<string, Promise<void>>();
-  const pending = new Set<string>();
   function reindex(sessionId?: string) {
     const key = sessionId ?? "__all__";
     if (inflight.has(key)) {
@@ -44,9 +47,10 @@ export function createMemory(log: (level: "info" | "warn" | "error", message: st
               const s = getSession(source, sessionId);
               if (s) await syncSession(source, index, s);
               // Cheap (two small SELECTs + rare DELETEs), so prune on every idle:
-              // the syncAll path below effectively never fires (session.idle always
-              // carries a sessionID), and without this, deleted conversations would
-              // linger in the index — searchable and readable — for plugin-only users.
+              // the syncAll path below runs only for the local startup backfill, so
+              // without this, deleted conversations would linger in the index —
+              // searchable and readable — until a restart, or indefinitely with a
+              // remote index, for plugin-only users.
               await pruneOrphans(source, index);
             } else {
               await syncAll(source, index); // syncAll prunes source-deleted orphans
