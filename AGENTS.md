@@ -12,6 +12,12 @@ Semantic search over past OpenCode conversations via native plugin tools.
 - `src/parser.ts` — transcript → condensed exchanges; exclusion marker handling
 - `src/embed.ts` — embedding host/client; lazy Node sidecar by default
 - `src/embed-sidecar.mjs` — persistent Node 20+ Transformers.js server (NDJSON)
+- `src/embed-model.mjs` — model loading shared by sidecar and shared service
+  (keeps vectors identical across modes)
+- `src/embed-service.mjs`, `src/embed-shared.ts` — opt-in
+  `EPISODIC_EMBED_MODE=shared` service (per-user Unix socket, link(2)
+  single-instance claim) and its Bun client; tests drive the real service with
+  `spikes/fake-embed-service.mjs` as the Node binary
 - `src/embed-inline.ts` — explicit lazy inline escape hatch; unsafe in affected Bun hosts
 - `src/store.ts` — index SQLite DB; brute-force cosine vector search (**the**
   swap point if an ANN index is ever needed) + FTS5 BM25 lexical search, fused

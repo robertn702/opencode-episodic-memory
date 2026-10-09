@@ -78,6 +78,22 @@ is embedding activity; idle eviction reduces retained idle memory but does not
 cap memory across simultaneously active runtimes. The first request after
 eviction therefore includes model-loading latency.
 
+`EPISODIC_EMBED_MODE=shared` swaps the private child for one service per user
+and configuration (`src/embed-service.mjs`), reached over a Unix socket in a
+`0700` per-user directory. The socket name hashes protocol version, package
+version, and model, and a hello handshake re-checks them. The service binds a
+temporary socket name and publishes it with `link(2)`, which cannot overwrite an
+existing name, so exactly one of several concurrent starters wins and the rest
+exit. A stale socket from a crash is renamed aside and deleted only if it is
+still the inode that failed the liveness probe. A periodic ownership check makes
+a service retire if its path ever names a different socket. One global FIFO
+queue serializes inference for all clients, with a bound of 256 queued requests.
+An inference running longer than half the request timeout makes the service
+exit, because a hung native call cannot be cancelled. The service also exits
+after the idle timeout with no work. Clients reconnect, or
+start a replacement, on their next request and never fall back to a private
+sidecar.
+
 ## Module map
 
 | Module | Role | Key exports |
@@ -86,6 +102,9 @@ eviction therefore includes model-loading latency.
 | `src/parser.ts` | Transcript → condensed `Exchange[]` (user text, assistant text, tool names) | `parseTranscript`, `exchangeText`, `hasExcludeMarker` (fast path) |
 | `src/embed.ts` | Embedding API + Node-sidecar client. Prepares text, manages one lazy child and its idle eviction, and validates protocol vectors without importing Transformers.js | `embed` (docs), `embedQuery` (adds retrieval prefix), `QUERY_PREFIX`, `MAX_CHARS` |
 | `src/embed-sidecar.mjs` | Plain Node ESM NDJSON server; dynamically imports Transformers.js and holds the pipeline while warm | protocol `{id,texts}` -> `{id,vectors}` / `{id,error}` |
+| `src/embed-model.mjs` | Model loading and request validation shared by the sidecar and the shared service, so both produce identical vectors | `loadEmbedder`, `MODEL` |
+| `src/embed-service.mjs` | Opt-in shared Node service on a per-user Unix socket: atomic single-instance claim, hello handshake, global FIFO queue, idle exit | `runService`, protocol `{hello}` -> `{ready}`, then the sidecar protocol |
+| `src/embed-shared.ts` | Bun client for shared mode: connects or starts the service, routes responses by id, retries once on service loss | `requestShared`, `sharedServiceInfo` |
 | `src/embed-inline.ts` | Explicit lazy inline fallback for exceptional hosts | `embedInline` |
 | `src/store.ts` | Local SQLite schema/retrieval plus the opt-in async libSQL boundary | `openIndex`, `openConfiguredIndex`, `replaceSessionChunks`, `search`, `textSearch`, `stats` |
 | `src/indexer.ts` | Incremental, idempotent sync; watermark-based; source-scoped remote pruning | `syncSession`, `syncAll`, `pruneOrphans` |

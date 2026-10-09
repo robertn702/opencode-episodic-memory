@@ -2,6 +2,7 @@
 // sidecar so importing the OpenCode plugin never loads ML native addons into
 // its embedded Bun process.
 import { fileURLToPath } from "node:url";
+import { requestShared } from "./embed-shared.ts";
 
 export const DEFAULT_MODEL = "Snowflake/snowflake-arctic-embed-m-v1.5";
 
@@ -20,7 +21,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
-export type EmbedMode = "sidecar" | "inline";
+export type EmbedMode = "sidecar" | "shared" | "inline";
 
 type PendingRequest = {
   resolve: (vectors: Float32Array[]) => void;
@@ -53,8 +54,8 @@ let activeOperations = 0;
 
 export function getEmbedMode(): EmbedMode {
   const mode = process.env.EPISODIC_EMBED_MODE ?? "sidecar";
-  if (mode === "sidecar" || mode === "inline") return mode;
-  throw new Error(`Invalid EPISODIC_EMBED_MODE ${JSON.stringify(mode)}; expected "sidecar" or "inline".`);
+  if (mode === "sidecar" || mode === "shared" || mode === "inline") return mode;
+  throw new Error(`Invalid EPISODIC_EMBED_MODE ${JSON.stringify(mode)}; expected "sidecar", "shared", or "inline".`);
 }
 
 function tail(value: string, addition: string): string {
@@ -362,7 +363,8 @@ async function requestSidecar(texts: string[], readyTimeoutMs: number, requestTi
 async function embedRaw(texts: string[]): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
   const prepared = texts.map((text) => text.slice(0, MAX_CHARS));
-  if (getEmbedMode() === "inline") {
+  const mode = getEmbedMode();
+  if (mode === "inline") {
     // Unsafe under affected OpenCode/Bun versions: this intentionally loads
     // Transformers.js only when the caller explicitly opts in.
     const { embedInline } = await import("./embed-inline.ts");
@@ -372,6 +374,16 @@ async function embedRaw(texts: string[]): Promise<Float32Array[]> {
   const readyTimeoutMs = positiveIntegerEnv("EPISODIC_EMBED_READY_TIMEOUT_MS", DEFAULT_READY_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const requestTimeoutMs = positiveIntegerEnv("EPISODIC_EMBED_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT_MS, MAX_TIMEOUT_MS);
   const idleTimeoutMs = idleTimeoutEnv();
+  if (mode === "shared") {
+    // The shared service owns idle shutdown; it inherits these settings from
+    // the client that starts it.
+    const model = process.env.EPISODIC_EMBED_MODEL ?? DEFAULT_MODEL;
+    const vectors: Float32Array[] = [];
+    for (let index = 0; index < prepared.length; index += batchSize) {
+      vectors.push(...await requestShared(prepared.slice(index, index + batchSize), model, readyTimeoutMs, requestTimeoutMs));
+    }
+    return vectors;
+  }
   activeOperations += 1;
   if (sidecar) clearIdleTimer(sidecar);
   try {

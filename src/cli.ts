@@ -15,7 +15,8 @@ import { parseArgs } from "node:util";
 import { openSource, sourceDbPath, sourceLayout, listSessions, getSession, getTranscriptChecked } from "./reader";
 import { openConfiguredIndex, indexDbPath, type IndexStore } from "./store";
 import { syncAll } from "./indexer";
-import { embed, embedQuery, getEmbedMode } from "./embed";
+import { DEFAULT_MODEL, embed, embedQuery, getEmbedMode } from "./embed";
+import { sharedServiceInfo } from "./embed-shared";
 import { parseDateArg, fmtDate, renderTranscript, formatHits } from "./format";
 
 const [, , command, ...rest] = process.argv;
@@ -164,7 +165,7 @@ async function main() {
 
     case "doctor": {
       let ok = true;
-      let mode: "sidecar" | "inline";
+      let mode: "sidecar" | "shared" | "inline";
       try {
         mode = getEmbedMode();
         console.log(`✓ embedding mode: ${mode}`);
@@ -172,7 +173,7 @@ async function main() {
         console.error(`✗ embedding mode: ${e}`);
         process.exit(1);
       }
-      if (mode === "sidecar") {
+      if (mode !== "inline") {
         const nodeBinary = process.env.EPISODIC_NODE_BINARY ?? "node";
         try {
           const node = Bun.spawnSync([nodeBinary, "--version"], { stdout: "pipe", stderr: "pipe" });
@@ -180,14 +181,17 @@ async function main() {
           const match = /^v(\d+)\./.exec(version);
           if (!node.success || !match || Number(match[1]) < 20) {
             const detail = new TextDecoder().decode(node.stderr).trim();
-            console.error(`✗ Node 20+ required for sidecar mode (${JSON.stringify(nodeBinary)} ${version || detail || "not found"}). Set EPISODIC_NODE_BINARY to a Node 20+ executable.`);
+            console.error(`✗ Node 20+ required for ${mode} mode (${JSON.stringify(nodeBinary)} ${version || detail || "not found"}). Set EPISODIC_NODE_BINARY to a Node 20+ executable.`);
             ok = false;
           } else {
-            console.log(`✓ sidecar Node: ${nodeBinary} ${version}`);
+            console.log(`✓ ${mode} Node: ${nodeBinary} ${version}`);
           }
         } catch (e) {
-          console.error(`✗ Node 20+ required for sidecar mode (${JSON.stringify(nodeBinary)} could not start: ${e}). Set EPISODIC_NODE_BINARY to a Node 20+ executable.`);
+          console.error(`✗ Node 20+ required for ${mode} mode (${JSON.stringify(nodeBinary)} could not start: ${e}). Set EPISODIC_NODE_BINARY to a Node 20+ executable.`);
           ok = false;
+        }
+        if (mode === "shared") {
+          console.log(`✓ shared service socket: ${sharedServiceInfo(process.env.EPISODIC_EMBED_MODEL ?? DEFAULT_MODEL).socketPath}`);
         }
       } else {
         console.warn("! inline embedding mode loads native ML addons into Bun; it is unsafe on affected OpenCode/Bun versions. Prefer sidecar mode.");
