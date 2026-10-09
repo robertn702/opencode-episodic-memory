@@ -2,16 +2,27 @@
 import { Plugin } from "@opencode/plugin";
 import { z } from "zod";
 import { createMemory } from "./shared";
+import { createLogger } from "./log";
+
+type ServerEvent = ReturnType<Plugin.Context["event"]["subscribe"]> extends AsyncIterable<infer E> ? E : never;
+
+// OpenCode v2 marks a session idle with a terminal execution event. The legacy
+// session.idle and session.status events are still declared but never published.
+// A superseded run is followed by another execution that settles on its own.
+// Shutdown interrupts are left to the next local startup backfill (or CLI sync
+// for a remote index).
+function settledSessionID(event: ServerEvent): string | undefined {
+  if (event.type === "session.execution.succeeded" || event.type === "session.execution.failed") return event.data.sessionID;
+  if (event.type === "session.execution.interrupted" && event.data.reason !== "shutdown" && event.data.reason !== "superseded") {
+    return event.data.sessionID;
+  }
+  return undefined;
+}
 
 const v2 = Plugin.define({
   id: "episodic-memory",
   async setup(ctx) {
-    const log = async (level: "info" | "warn" | "error", message: string) => {
-      // Logging must never interrupt an indexing run or a tool response.
-      try {
-        console[level](`[episodic-memory] ${message}`);
-      } catch {}
-    };
+    const log = createLogger(ctx.app.channel);
     const { tools, reindex } = createMemory(log);
 
     await ctx.tool.transform((editor) => {
@@ -33,12 +44,24 @@ const v2 = Plugin.define({
     void (async () => {
       try {
         for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
-          if (event.type === "session.idle") reindex(event.data.sessionID);
+          const sessionID = settledSessionID(event);
+          if (sessionID) void reindex(sessionID);
         }
+        if (!controller.signal.aborted) await log("warn", "event subscription ended; automatic reindex stopped");
       } catch (error) {
         if (!controller.signal.aborted) await log("warn", `event subscription failed: ${error}`);
       }
     })();
+
+    // Backfill sessions that settled while no plugin was indexing. A local
+    // freshness scan is cheap; a remote one reads every transcript and makes a
+    // network round trip per session, so remote users sync from the CLI.
+    if (process.env.EPISODIC_INDEX_URL) {
+      await log("info", "started; remote index, so no startup backfill (run the CLI `sync` command to backfill)");
+    } else {
+      await log("info", "started; backfilling local index");
+      void reindex();
+    }
     return () => controller.abort();
   },
 });

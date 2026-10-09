@@ -39,7 +39,7 @@ flowchart LR
     end
 
     subgraph Frontends["Front-ends"]
-        PLG[plugin/v2.ts entrypoint<br/>episodic_search · episodic_read_window · episodic_read_session<br/>session.idle reindex]
+        PLG[plugin/v2.ts entrypoint<br/>episodic_search · episodic_read_window · episodic_read_session<br/>settled-session reindex]
         CLI[src/cli.ts<br/>sync · search · read · stats · doctor]
     end
 
@@ -54,7 +54,7 @@ flowchart LR
     S <--> RDB
     PLG --> S
     CLI --> S
-    PLG -.->|session.idle| R
+    PLG -.->|session.execution.*| R
     SK -.when-to-recall.-> PLG
 
     HF[(Hugging Face<br/>model hub)] -.one-time ~100 MB<br/>download, then cached.-> ES
@@ -91,7 +91,7 @@ eviction therefore includes model-loading latency.
 | `src/indexer.ts` | Incremental, idempotent sync; watermark-based; source-scoped remote pruning | `syncSession`, `syncAll`, `pruneOrphans` |
 | `src/format.ts` | Shared presentation for CLI + plugin | `parseDateArg`, `renderTranscript`, `renderTranscriptContext`, `formatHits` |
 | `src/cli.ts` | `opencode-episodic` binary: sync / search / read / stats / doctor | — |
-| `plugin/v2.ts`, `plugin/shared.ts` | V2 `Plugin.define` registration; tools + `session.idle` reindex | V2 default export |
+| `plugin/v2.ts`, `plugin/shared.ts`, `plugin/log.ts` | V2 `Plugin.define` registration; tools + settled-session reindex + local startup backfill; log lines appended to OpenCode's log file | V2 default export |
 | `skills/remembering-conversations/` | Skill teaching the agent when to invoke the tools | — |
 
 ## Data model
@@ -184,13 +184,21 @@ conversation metadata. Remote mode has no FTS tables or triggers.
 
 Two triggers feed the same code path: the CLI's `sync` command (bulk,
 watermark-based, all-or-nothing on structural drift) and the plugin's
-`session.idle` handler (single-session, debounced via an in-flight map,
+settled-session handler (single-session, debounced via an in-flight map,
 fire-and-forget so it never blocks the conversation; also prunes orphans on
 every idle so deleted conversations don't linger for plugin-only users).
+OpenCode v2 never publishes `session.idle` or `session.status`, though both are
+still declared in its schema. A session is idle once a terminal
+`session.execution.succeeded`, `failed`, or `interrupted` event arrives;
+shutdown interrupts are skipped. With a local index, the plugin also runs
+`syncAll` on startup (a fresh scan takes about 90 ms over 3k sessions). Remote
+users backfill with the CLI `sync`. The plugin context has no logger and server
+stderr is discarded, so `plugin/log.ts` appends `[episodic-memory]` lines to
+OpenCode's own log file.
 
 ```mermaid
 sequenceDiagram
-    participant T as Trigger<br/>(CLI sync / session.idle)
+    participant T as Trigger<br/>(CLI sync / session.execution.*)
     participant I as indexer.ts
     participant R as reader.ts
     participant P as parser.ts

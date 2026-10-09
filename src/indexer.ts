@@ -69,6 +69,12 @@ export async function syncSession(
   const date = new Date(s.time_created).toISOString().slice(0, 10);
   const texts = exchanges.map((e) => exchangeText(s.title, date, e));
   const vectors = await embed(texts);
+  // A concurrent per-session reindex may have written a newer row (or an
+  // exclusion tombstone) while this run embedded an older snapshot. Compare
+  // against this run's own read so --force still rebuilds unchanged rows.
+  const current = await index.getIndexedSession(s.id);
+  const changed = current && (current.indexed_at !== prior?.indexed_at || current.source_time_updated !== prior?.source_time_updated);
+  if (changed && current.status.endsWith("-v2") && current.source_time_updated > s.time_updated) return "fresh";
   // Embedding can take long enough for the source conversation to change. Run
   // the cheap authoritative raw-marker check again immediately before a remote
   // upload so a marker added during embedding never exports the prepared data.
@@ -100,8 +106,10 @@ export async function syncAll(
   }
 
   // Prune index rows whose session no longer exists in the source DB;
-  // otherwise their stale (possibly wrong-dims) chunks linger forever.
-  result.pruned = await pruneOrphans(source, index, sessions);
+  // otherwise their stale (possibly wrong-dims) chunks linger forever. Re-list
+  // here: a session created and indexed by the plugin during a long sync is
+  // absent from the start-of-run list and must not be pruned.
+  result.pruned = await pruneOrphans(source, index);
 
   return result;
 }
