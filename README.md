@@ -143,8 +143,8 @@ instruction-tag match — the intent is the same, but our matching is literal.
 | `EPISODIC_INDEX_AUTH_TOKEN` | unset | Required for remote network URLs; passed to `@libsql/client` |
 | `EPISODIC_SOURCE_ID` | unset | Required in remote mode; stable device/source identity |
 | `EPISODIC_EMBED_MODEL` | `Snowflake/snowflake-arctic-embed-m-v1.5` | Transformers.js embedding model |
-| `EPISODIC_EMBED_MODE` | `sidecar` | `sidecar` runs embeddings in Node; `inline` is an explicit escape hatch |
-| `EPISODIC_NODE_BINARY` | `node` | Node 20+ executable used by sidecar mode |
+| `EPISODIC_EMBED_MODE` | `sidecar` | `sidecar` runs a private Node process per OpenCode process; `shared` reuses one Node service across processes; `inline` is an explicit escape hatch |
+| `EPISODIC_NODE_BINARY` | `node` | Node 20+ executable used by sidecar and shared modes |
 | `EPISODIC_EMBED_BATCH_SIZE` | `32` | Texts per sidecar request (1-64) |
 | `EPISODIC_EMBED_READY_TIMEOUT_MS` | `600000` | Maximum wait for sidecar/model startup |
 | `EPISODIC_EMBED_REQUEST_TIMEOUT_MS` | `120000` | Maximum wait for a post-startup embedding request |
@@ -163,6 +163,50 @@ keep it alive. Background indexing counts as embedding activity. Invalid timeout
 settings fail before a sidecar is spawned; the timer is unref'd so it does not
 keep the CLI running. Idle eviction reduces retained idle memory, but does not
 cap memory across simultaneously active runtimes.
+
+### Optional shared embedding service
+
+With several OpenCode processes open, each sidecar loads its own copy of the
+model. Set `EPISODIC_EMBED_MODE=shared` in every OpenCode process (and the CLI)
+to have them use one local Node service instead. In a two-client test, total
+embedding memory dropped from about 1.9 GB to 0.94 GB, and query vectors were
+identical to sidecar mode, so existing indexes stay valid.
+
+- **Location and access.** The service listens on a Unix socket in
+  `$XDG_RUNTIME_DIR/episodic-memory-<uid>/` (falling back to the system temp
+  directory). The directory must be owned by you with mode `0700`, otherwise
+  the client refuses to use it. The socket is `0600`. A log for the service is
+  written next to the socket, with the same name and a `.log` extension.
+  `doctor` prints the socket path.
+- **Compatibility.** Each socket is keyed by protocol version, package version,
+  and model, so clients with different versions or `EPISODIC_EMBED_MODEL`
+  values get separate services rather than mixed vectors. The handshake also
+  rejects mismatches with a clear error.
+- **Startup.** The first client that finds no service starts one. Clients that
+  start at the same moment all end up on a single service; extra starters exit
+  on their own. Batch size, idle timeout, and request timeout (which sets the
+  stuck-inference limit below) come from the client that started the service.
+- **Lifecycle.** A client exiting only closes its own connection. The service
+  exits after `EPISODIC_EMBED_IDLE_TIMEOUT_MS` with no embedding work (`0`
+  keeps it running until killed), and the next request starts a fresh one. If
+  a single inference runs longer than half of `EPISODIC_EMBED_REQUEST_TIMEOUT_MS`,
+  the service assumes it is stuck and exits. If the service crashes or exits,
+  in-flight requests are retried once against a new service, which replaces the
+  stale socket.
+- **Failures.** Shared mode never falls back to a private sidecar. If the
+  service cannot start, load the model, or answer in time, the error includes
+  the end of its log.
+- **Inspecting or stopping it.** `pgrep -af embed-service.mjs` lists running
+  services. `pkill -f embed-service.mjs` stops them; clients start a new one
+  on their next request.
+- **Throughput.** One request runs at a time across all clients, so
+  simultaneous indexing in several processes waits in a queue instead of
+  running in parallel. On a 16-core machine, two clients embedding 64 chunks
+  each finished in about the same time as with two sidecars, because both
+  sidecars already competed for the same CPU. A search query waits behind any
+  batches already queued by other processes, so searching while another
+  process is indexing can be slower than in sidecar mode.
+  `EPISODIC_EMBED_REQUEST_TIMEOUT_MS` includes this queue wait.
 
 ### Optional shared remote index
 
