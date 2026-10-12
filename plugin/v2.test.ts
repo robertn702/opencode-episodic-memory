@@ -3,8 +3,10 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import { getIndexedSession, openIndex } from "../src/store";
 import { formatLogLine, openCodeLogFile } from "./log";
+import { createMemory } from "./shared";
 import v2 from "./v2";
 
 const root = mkdtempSync(join(tmpdir(), "episodic-plugin-v2-test-"));
@@ -175,6 +177,25 @@ describe("v2 plugin reindex trigger", () => {
     } finally {
       await cleanup();
     }
+  });
+});
+
+describe("read tool schemas", () => {
+  const readTools = ["episodic_read_window", "episodic_read_session"] as const;
+  const tools = () => createMemory(async () => {}).tools;
+
+  test("source_id is optional with a local index", () => {
+    for (const name of readTools) expect(tools()[name].args.source_id.isOptional()).toBe(true);
+  });
+
+  test("source_id is required with a remote index and rejected before execute", () => {
+    process.env.EPISODIC_INDEX_URL = `file:${join(dir, "remote.db")}`;
+    process.env.EPISODIC_SOURCE_ID = "test-source";
+    const t = tools();
+    for (const name of readTools) expect(t[name].args.source_id.isOptional()).toBe(false);
+    // Schema validation throws synchronously, before the runtime remote-mode check runs.
+    expect(() => t.episodic_read_window.execute({ session_id: "ses_x", anchor_message_id: "msg_x" })).toThrow(z.ZodError);
+    expect(() => t.episodic_read_session.execute({ session_id: "ses_x" })).toThrow(z.ZodError);
   });
 });
 

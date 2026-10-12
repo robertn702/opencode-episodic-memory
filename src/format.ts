@@ -123,8 +123,9 @@ function truncateContext(value: string, byteLimit: number): string {
 export function formatHit(h: SearchHit, snippetLength = 400, scoreLabel = "score"): string {
   const snippet = h.text.replace(/\s+/g, " ").slice(0, snippetLength);
   const anchor = h.anchor_message_id ?? "unavailable (refresh/reindex required)";
-  const source = h.source_id ? `source: ${h.source_id}\n` : "";
-  return `## ${fmtDate(h.time_created)} — ${h.title}\n${source}session: ${h.session_id}  ${scoreLabel}: ${h.score.toFixed(3)}\nanchor: ${anchor}\n${h.directory}\n> ${snippet}`;
+  // Keep source beside session and anchor so all three read-tool arguments are copied together.
+  const source = h.source_id ? `  source: ${h.source_id}` : "";
+  return `## ${fmtDate(h.time_created)} — ${h.title}\nsession: ${h.session_id}${source}  anchor: ${anchor}\n${scoreLabel}: ${h.score.toFixed(3)}\n${h.directory}\n> ${snippet}`;
 }
 
 export function formatHits(hits: SearchHit[], snippetLength = 400, scoreLabel = "score"): string {
