@@ -132,7 +132,9 @@ export function createMemory(log: (level: "info" | "warn" | "error", message: st
           "Read bounded context around an anchor from episodic_search. Preserve session_id, anchor_message_id, and source_id. Current-source hits use privacy-gated live messages; foreign-source hits use labeled indexed condensed exchanges that may be stale. Missing or stale anchors cannot provide a window; use episodic_read_session with source_id and indexed: true for indexed excerpts instead.",
         args: {
           session_id: z.string().describe("Session ID from episodic_search, e.g. ses_..."),
-          source_id: z.string().optional().describe("Source ID shown by remote episodic_search results; required for remote indexes"),
+          source_id: remoteSearch
+            ? z.string().describe("Source ID from the episodic_search hit (required with a remote index)")
+            : z.string().optional().describe("Source ID shown by remote episodic_search results; required for remote indexes"),
           anchor_message_id: z.string().describe("Anchor message ID from episodic_search"),
           before: z.number().optional().describe("Messages before the anchor, or indexed chunks for a foreign source, 0-20 (default 3)"),
           after: z.number().optional().describe("Messages after the anchor, or indexed chunks for a foreign source, 0-20 (default 3)"),
@@ -172,7 +174,9 @@ export function createMemory(log: (level: "info" | "warn" | "error", message: st
           "Read the full transcript of a past OpenCode session, given a session ID (from episodic_search results). Use after episodic_read_window when the bounded window is insufficient. Reconstructs from the live session store; falls back to indexed excerpts if the session was deleted.",
         args: {
           session_id: z.string().describe("Session ID, e.g. ses_..."),
-          source_id: z.string().optional().describe("Source ID shown by remote episodic_search results"),
+          source_id: remoteSearch
+            ? z.string().describe("Source ID from the episodic_search hit (required with a remote index)")
+            : z.string().optional().describe("Source ID shown by remote episodic_search results"),
           indexed: z.boolean().optional().describe("Force reading from the index instead of the live session store"),
         },
         async execute(args) {

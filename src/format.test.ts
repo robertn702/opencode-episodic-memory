@@ -1,7 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
-import { renderIndexedContext, renderTranscriptContext } from "./format";
+import { formatHit, renderIndexedContext, renderTranscriptContext } from "./format";
 import type { SourceMessage } from "./reader";
+
+describe("formatHit", () => {
+  test("puts source on the same line as session and anchor", () => {
+    const output = formatHit({ source_id: "src_a", session_id: "ses_a", seq: 0, time_created: 0, anchor_message_id: "msg_a", text: "hit", score: 0.5, title: "T", directory: "/d" });
+    expect(output.split("\n")).toContain("session: ses_a  source: src_a  anchor: msg_a");
+  });
+
+  test("omits source when the hit has none", () => {
+    const output = formatHit({ session_id: "ses_a", seq: 0, time_created: 0, anchor_message_id: "msg_a", text: "hit", score: 0.5, title: "T", directory: "/d" });
+    expect(output.split("\n")).toContain("session: ses_a  anchor: msg_a");
+  });
+});
 
 describe("renderTranscriptContext", () => {
   test("truncates oversized preceding content without losing the anchor or following message", () => {
