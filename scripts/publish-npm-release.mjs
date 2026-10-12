@@ -30,7 +30,7 @@ export async function ensurePublished({
   expectedIntegrity,
   runNpm = defaultRunNpm,
   sleep = defaultSleep,
-  attempts = 12,
+  attempts = 60,
   delayMs = 5_000,
 }) {
   if (!INTEGRITY_RE.test(expectedIntegrity)) {
