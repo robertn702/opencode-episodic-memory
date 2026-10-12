@@ -39,20 +39,18 @@ tends to match injected boilerplate on this corpus.
 ## Install
 
 ```bash
-opencode plugin opencode-episodic-memory@0.4.2 -g
+opencode plugin add opencode-episodic-memory@latest
 ```
 
-This adds the plugin to your OpenCode config (`-g` = global config; omit it
-to install for the current project only). **Pin the version** — OpenCode
-caches npm plugins and never re-resolves a bare name / `@latest`
-([anomalyco/opencode#25293](https://github.com/anomalyco/opencode/issues/25293)).
-To update later, re-run with the new version and `--force`.
+This adds the plugin to your global OpenCode config. OpenCode does not update
+npm plugins on its own; run `opencode plugin check` to see whether a newer
+release exists and `opencode plugin update` to install it.
 
-Or edit `~/.config/opencode/opencode.json` manually:
+Or edit `~/.config/opencode/opencode.jsonc` manually:
 
 ```jsonc
 {
-  "plugin": ["opencode-episodic-memory@0.4.2"]
+  "plugins": ["opencode-episodic-memory@latest"]
 }
 ```
 
@@ -81,10 +79,10 @@ current project. `npx skills update` picks up future skill changes.)
 
 Alternatively, copy it manually — it's included in the npm package; once
 OpenCode has downloaded the plugin (i.e. after first launch), copy it out of
-the package cache (the path contains your pinned version):
+the package cache (if several installs are cached, `ls -t` puts the newest first):
 
 ```bash
-cp -r ~/.cache/opencode/packages/opencode-episodic-memory@0.4.2/node_modules/opencode-episodic-memory/skills/remembering-conversations ~/.config/opencode/skills/
+cp -r "$(ls -td ~/.cache/opencode/npm/opencode-episodic-memory@latest/*/ | head -1)node_modules/opencode-episodic-memory/skills/remembering-conversations" ~/.config/opencode/skills/
 ```
 
 Then backfill existing history and restart OpenCode:

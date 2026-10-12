@@ -153,10 +153,9 @@ Semantic search over past OpenCode conversations via native plugin tools.
   gate is `bash spikes/pack-smoke.sh` (pack → clean install → import → real
   Node-sidecar embed). Keep `src/embed-sidecar.mjs` included in the npm artifact
   and run the offline fake-sidecar protocol tests without downloading a model.
-  OpenCode does NOT auto-update npm plugins: its cache
-  (`~/.cache/opencode/packages/<spec>/`) short-circuits on any existing
-  install, so a bare package name resolves `@latest` once and stays pinned
-  forever (upstream bug anomalyco/opencode#25293). Dogfood configs must pin
-  `"opencode-episodic-memory@X.Y.Z"` and bump the pin every release —
-  restart alone never picks up a new publish.
+  OpenCode v2 does NOT auto-update npm plugins, but `@latest` is safe: dogfood
+  configs use `"opencode-episodic-memory@latest"`, and after a release
+  `opencode plugin update` installs the new version into
+  `~/.cache/opencode/npm/<spec>/<timestamp>/` (`opencode plugin check` shows
+  what is installed). Restart alone never picks up a new publish.
 - Config is env-var only (`EPISODIC_*`), no config file yet (YAGNI).

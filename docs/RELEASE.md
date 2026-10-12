@@ -5,9 +5,8 @@ Semver while 0.x: breaking changes bump minor, fixes bump patch.
 ## Checklist
 
 1. `git checkout main && git pull` — clean tree.
-2. Bump `version` in `package.json`, and update every version pin in `README.md`
-   (plugin install, config snippet, manual skill-copy cache path, `bunx`
-   commands) to match — grep for the old `@X.Y.Z` to catch them all.
+2. Bump `version` in `package.json`, and update the `bunx` command pins in `README.md`
+   to match (the plugin install and config snippet use `@latest`) — grep for the old `@X.Y.Z` to catch them all.
 3. `bun install && bun run typecheck && bun test && bun run spikes/entrypoint-smoke.ts`
    (`prepublishOnly` remains a backstop for manual directory publishes; the
    workflow publishes a preverified tarball and runs these gates explicitly).
@@ -71,13 +70,11 @@ that it still resolves to the exact commit that produced the npm artifact.
 
 ## After publishing
 
-- Dogfood: update the plugin entry in `~/.config/opencode/opencode.json` to
-  the just-published version — `"opencode-episodic-memory@X.Y.Z"` — then
-  restart OpenCode and run an `episodic_search`. The version MUST be pinned:
-  OpenCode's npm plugin cache short-circuits on any existing install and
-  never re-resolves a bare name / `@latest` (upstream bug
-  anomalyco/opencode#25293; even `--force` doesn't help), so an unpinned
-  entry silently runs the first version ever installed.
+- Dogfood: with the plugin entry set to `"opencode-episodic-memory@latest"`,
+  run `opencode plugin update` once npm shows the new version, confirm it with
+  `opencode plugin check`, then restart OpenCode and run an `episodic_search`.
+  OpenCode does not update plugins on its own, so restarting alone keeps the
+  old version.
 - If the embedding model or a transformers.js major changed, state
   index-validity in the release notes (cosine-verified compatible, or
   "rebuild required").
