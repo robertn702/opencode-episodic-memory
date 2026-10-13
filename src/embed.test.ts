@@ -10,7 +10,7 @@ const exitOncePath = join(directory, "exit-once");
 const startupOncePath = join(directory, "startup-once");
 const fixture = fileURLToPath(new URL("../spikes/fake-embed-sidecar.mjs", import.meta.url));
 const source = fileURLToPath(new URL("./embed.ts", import.meta.url));
-const sidecarSource = fileURLToPath(new URL("./embed-sidecar.mjs", import.meta.url));
+const modelSource = fileURLToPath(new URL("./embed-model.mjs", import.meta.url));
 const controlledEnvironment = [
   "EPISODIC_NODE_BINARY",
   "EPISODIC_EMBED_MODE",
@@ -166,7 +166,7 @@ describe("embedding sidecar protocol", () => {
   });
 
   test("keeps the host and sidecar default model synchronized", () => {
-    expect(readFileSync(sidecarSource, "utf8")).toContain(`?? ${JSON.stringify(DEFAULT_MODEL)}`);
+    expect(readFileSync(modelSource, "utf8")).toContain(`?? ${JSON.stringify(DEFAULT_MODEL)}`);
   });
 
   test("splits large embedding inputs into bounded sidecar requests without reordering", async () => {

@@ -61,4 +61,13 @@ if (v.length !== 768 || Math.abs(norm - 1) > 1e-3) {
 console.log('sidecar embed ok: dims', v.length, 'norm', norm.toFixed(4));
 ")
 
+echo "== packaged shared-service embed smoke =="
+mkdir -m 700 "$WORK/runtime"
+(cd "$WORK/cache" && EPISODIC_EMBED_MODE=shared XDG_RUNTIME_DIR="$WORK/runtime" EPISODIC_EMBED_IDLE_TIMEOUT_MS=1000 bun -e "
+const { embedQuery } = await import('./node_modules/opencode-episodic-memory/src/embed.ts');
+const [v] = await embedQuery('pack smoke test');
+if (v.length !== 768) throw new Error('bad shared embedding: dims=' + v.length);
+console.log('shared embed ok: dims', v.length);
+")
+
 echo "PACK SMOKE OK"
